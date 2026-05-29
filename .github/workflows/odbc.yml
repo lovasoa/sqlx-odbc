@@ -18,11 +18,13 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
+
+      - uses: Swatinem/rust-cache@v2
 
       - name: Install ODBC headers
         run: sudo apt-get update && sudo apt-get install -y unixodbc-dev
@@ -42,15 +44,19 @@ jobs:
           - sqlite
 
     env:
-      DUCKDB_ODBC_VERSION: v1.5.2
+      DUCKDB_ODBC_VERSION: v1.5.3.0
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - uses: dtolnay/rust-toolchain@stable
 
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: odbc-${{ matrix.driver }}
+
       - name: Install ODBC runtime
-        run: sudo apt-get update && sudo apt-get install -y curl libsqliteodbc odbcinst unixodbc unzip
+        run: sudo apt-get update && sudo apt-get install -y curl libsqliteodbc unixodbc-dev unzip
 
       - name: Install DuckDB ODBC driver
         if: matrix.driver == 'duckdb'
@@ -58,7 +64,7 @@ jobs:
           curl -L \
             --fail \
             --output "$RUNNER_TEMP/duckdb_odbc.zip" \
-            "https://github.com/duckdb/duckdb/releases/download/${DUCKDB_ODBC_VERSION}/duckdb_odbc-linux-amd64.zip"
+            "https://github.com/duckdb/duckdb-odbc/releases/download/${DUCKDB_ODBC_VERSION}/duckdb_odbc-linux-amd64.zip"
           unzip -q "$RUNNER_TEMP/duckdb_odbc.zip" -d "$RUNNER_TEMP/duckdb_odbc"
           duckdb_driver="$(find "$RUNNER_TEMP/duckdb_odbc" -type f -name libduckdb_odbc.so -print -quit)"
           test -n "$duckdb_driver"
@@ -76,9 +82,11 @@ jobs:
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
 
       - name: Install ODBC headers
         run: sudo apt-get update && sudo apt-get install -y unixodbc-dev
