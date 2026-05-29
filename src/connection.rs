@@ -12,6 +12,7 @@ use sqlx_core::executor::{Execute, Executor};
 use sqlx_core::transaction::Transaction;
 use sqlx_core::Either;
 use std::future::Future;
+use std::sync::Arc;
 
 /// Blocking ODBC connection wrapper.
 ///
@@ -506,10 +507,11 @@ where
                 ),
             )
         })?;
-    let columns = bindings
+    let columns: Arc<[OdbcColumn]> = bindings
         .iter()
         .map(|binding| binding.column.clone())
-        .collect::<Vec<_>>();
+        .collect::<Vec<_>>()
+        .into();
     let mut rows = Vec::new();
 
     while let Some(batch) = row_set_cursor.fetch().map_err(|error| {
@@ -530,12 +532,24 @@ where
             })
             .collect::<std::result::Result<Vec<_>, _>>()?;
 
+        let mut column_iters = column_values
+            .into_iter()
+            .map(Vec::into_iter)
+            .collect::<Vec<_>>();
+
         for row_index in 0..batch.num_rows() {
-            let values = column_values
-                .iter()
-                .map(|values| OdbcValue::new(values[row_index].clone()))
-                .collect::<Vec<_>>();
-            rows.push(OdbcRow::new(columns.clone(), values));
+            let values = column_iters
+                .iter_mut()
+                .map(|values| {
+                    values.next().map(OdbcValue::new).ok_or_else(|| {
+                        sqlx_core::Error::Protocol(format!(
+                            "ODBC buffered fetch produced too few values for row {}",
+                            row_index + 1
+                        ))
+                    })
+                })
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            rows.push(OdbcRow::new_shared(Arc::clone(&columns), values));
         }
     }
 
@@ -719,7 +733,7 @@ fn collect_rows_unbuffered<C>(mut cursor: C) -> std::result::Result<Vec<OdbcRow>
 where
     C: Cursor + ResultSetMetadata,
 {
-    let columns = collect_columns(&mut cursor)?;
+    let columns: Arc<[OdbcColumn]> = collect_columns(&mut cursor)?.into();
     let mut rows = Vec::new();
 
     while let Some(mut cursor_row) = cursor.next_row().map_err(|error| {
@@ -730,7 +744,7 @@ where
     })? {
         let mut values = Vec::with_capacity(columns.len());
 
-        for column in &columns {
+        for column in columns.iter() {
             let column_number = u16::try_from(sqlx_core::column::Column::ordinal(column) + 1)
                 .map_err(|_| {
                     sqlx_core::Error::Protocol("ODBC column index exceeds u16".to_owned())
@@ -738,7 +752,7 @@ where
             values.push(fetch_value(&mut cursor_row, column_number, column)?);
         }
 
-        rows.push(OdbcRow::new(columns.clone(), values));
+        rows.push(OdbcRow::new_shared(Arc::clone(&columns), values));
     }
 
     Ok(rows)

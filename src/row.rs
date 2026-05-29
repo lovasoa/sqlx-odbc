@@ -1,15 +1,20 @@
 use crate::{Odbc, OdbcColumn, OdbcValue};
+use std::sync::Arc;
 
 /// Minimal ODBC row container used by the SQLx-core skeleton.
 #[derive(Debug, Clone, Default)]
 pub struct OdbcRow {
-    columns: Vec<OdbcColumn>,
+    columns: Arc<[OdbcColumn]>,
     values: Vec<OdbcValue>,
 }
 
 impl OdbcRow {
     /// Creates a row from column metadata and values.
     pub fn new(columns: Vec<OdbcColumn>, values: Vec<OdbcValue>) -> Self {
+        Self::new_shared(columns.into(), values)
+    }
+
+    pub(crate) fn new_shared(columns: Arc<[OdbcColumn]>, values: Vec<OdbcValue>) -> Self {
         Self { columns, values }
     }
 }
@@ -18,7 +23,7 @@ impl sqlx_core::row::Row for OdbcRow {
     type Database = Odbc;
 
     fn columns(&self) -> &[OdbcColumn] {
-        &self.columns
+        self.columns.as_ref()
     }
 
     fn try_get_raw<I>(
