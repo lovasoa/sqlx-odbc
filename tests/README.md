@@ -24,7 +24,7 @@ Run the same integration tests locally against one known driver:
 ```sh
 scripts/test-driver.sh duckdb
 DUCKDB_ODBC_DRIVER=/absolute/path/to/libduckdb_odbc.so scripts/test-driver.sh duckdb
-scripts/test-driver.sh sqlite
+scripts/test-driver.sh postgres
 ODBC_DATABASE_URL='DSN=MyDataSource;UID=user;PWD=password' scripts/test-driver.sh custom
 ```
 
@@ -33,12 +33,20 @@ The DuckDB script target defaults to the registered `DuckDB` driver name. Set
 library path. On macOS, that path normally points to `libduckdb_odbc.dylib` instead of the Linux
 `.so` file.
 
+The PostgreSQL target expects a reachable PostgreSQL server and the PostgreSQL
+ODBC driver registered with unixODBC. It defaults to
+`Driver={PostgreSQL Unicode};Server=localhost;Port=5432;Database=postgres;Uid=postgres;Pwd=postgres`.
+Override the pieces with `POSTGRES_ODBC_DRIVER`, `POSTGRES_HOST`,
+`POSTGRES_PORT`, `POSTGRES_DATABASE`, `POSTGRES_USER`, and
+`POSTGRES_PASSWORD`.
+
 The Rust tests intentionally read only `ODBC_DATABASE_URL`. CI covers multiple actual drivers with
 a job matrix that invokes `scripts/test-driver.sh` once per driver.
 
 Native requirements:
 
-- Unix-like systems need an ODBC driver manager such as `unixODBC` or `iODBC`.
+- Unix-like systems need the `unixODBC` driver manager unless the
+  `vendored-unix-odbc` feature is enabled.
 - A database-specific ODBC driver must be installed and discoverable by the driver manager.
 - DSNs must be configured in the driver manager's usual locations.
 - Buffered fetching can truncate long text or binary values when `max_column_size` is set.

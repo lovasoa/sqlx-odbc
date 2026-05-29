@@ -41,7 +41,20 @@ jobs:
       matrix:
         driver:
           - duckdb
-          - sqlite
+          - postgres
+
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
 
     env:
       DUCKDB_ODBC_VERSION: v1.5.3.0
@@ -56,7 +69,7 @@ jobs:
           key: odbc-${{ matrix.driver }}
 
       - name: Install ODBC runtime
-        run: sudo apt-get update && sudo apt-get install -y curl libsqliteodbc unixodbc-dev unzip
+        run: sudo apt-get update && sudo apt-get install -y curl odbc-postgresql unixodbc-dev unzip
 
       - name: Install DuckDB ODBC driver
         if: matrix.driver == 'duckdb'

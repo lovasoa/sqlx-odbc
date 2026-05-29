@@ -70,6 +70,13 @@ For the fastest local smoke test, install the DuckDB ODBC driver and run:
 ./scripts/test-driver.sh duckdb
 ```
 
+To test the same suite through the PostgreSQL ODBC driver, start PostgreSQL
+locally and run:
+
+```sh
+./scripts/test-driver.sh postgres
+```
+
 To test another installed driver, set a connection string and use `custom`:
 
 ```sh

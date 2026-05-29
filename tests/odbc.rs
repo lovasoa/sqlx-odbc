@@ -281,7 +281,7 @@ async fn sqlx_query_binds_heterogeneous_parameters_when_configured(
     };
 
     let row = sqlx_core::query::query(
-        "SELECT CAST(? AS INTEGER), CAST(? AS VARCHAR(32)), CAST(? AS DOUBLE)",
+        "SELECT CAST(? AS INTEGER), CAST(? AS VARCHAR(32)), CAST(? AS DOUBLE PRECISION)",
     )
     .bind(7_i32)
     .bind("odbc-param")
