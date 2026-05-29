@@ -218,9 +218,12 @@ impl<'c> Executor<'c> for &'c mut OdbcConnection {
             Ok(OdbcExecution::Done(result)) => {
                 stream::once(future::ready(Ok(Either::Left(result)))).boxed()
             }
-            Ok(OdbcExecution::Rows(rows)) => {
-                stream::iter(rows.into_iter().map(|row| Ok(Either::Right(row)))).boxed()
-            }
+            Ok(OdbcExecution::Rows(rows)) => stream::iter(
+                rows.into_iter()
+                    .map(|row| Ok(Either::Right(row)))
+                    .chain(std::iter::once(Ok(Either::Left(OdbcQueryResult::new(0))))),
+            )
+            .boxed(),
             Err(error) => stream::once(future::ready(Err(error))).boxed(),
         })
         .flatten()

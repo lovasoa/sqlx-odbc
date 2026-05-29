@@ -88,10 +88,16 @@ impl AnyConnectionBackend for OdbcConnection {
                 Ok(OdbcExecution::Done(result)) => {
                     stream::once(future::ready(Ok(Either::Left(map_result(result))))).boxed()
                 }
-                Ok(OdbcExecution::Rows(rows)) => stream::iter(rows.into_iter().map(|row| {
-                    let column_names = column_names(row.columns());
-                    AnyRow::map_from(&row, column_names).map(Either::Right)
-                }))
+                Ok(OdbcExecution::Rows(rows)) => stream::iter(
+                    rows.into_iter()
+                        .map(|row| {
+                            let column_names = column_names(row.columns());
+                            AnyRow::map_from(&row, column_names).map(Either::Right)
+                        })
+                        .chain(std::iter::once(Ok(Either::Left(map_result(
+                            OdbcQueryResult::new(0),
+                        ))))),
+                )
                 .boxed(),
                 Err(error) => stream::once(future::ready(Err(error))).boxed(),
             })
