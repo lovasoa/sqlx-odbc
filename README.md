@@ -10,7 +10,7 @@ to crates.io and is not wired into the `sqlx` facade crate, so examples use
 
 ```toml
 [dependencies]
-sqlx-odbc = "0.0.1-alpha"
+sqlx-odbc = "0.0.1-beta.1"
 sqlx-core = "=0.9.0"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 ```
@@ -103,7 +103,7 @@ the `unixODBC` driver manager separately, enable this crate's vendored feature:
 
 ```toml
 [dependencies]
-sqlx-odbc = { version = "0.0.1-alpha", features = ["vendored-unix-odbc"] }
+sqlx-odbc = { version = "0.0.1-beta.1", features = ["vendored-unix-odbc"] }
 sqlx-core = "=0.9.0"
 ```
 
