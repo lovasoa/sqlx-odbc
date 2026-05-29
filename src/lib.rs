@@ -12,7 +12,7 @@
 //! use sqlx_core::row::Row;
 //! use sqlx_odbc::OdbcConnection;
 //!
-//! # async fn run() -> Result<(), Box<dyn std::error::Error>> {
+//! # async fn run() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 //! let mut conn = OdbcConnection::connect("Driver=DuckDB;Database=/tmp/example.duckdb").await?;
 //!
 //! let row = sqlx_core::query::query("SELECT 1")
@@ -37,7 +37,7 @@
 //! ```no_run
 //! use sqlx_core::connection::Connection;
 //!
-//! # async fn run() -> Result<(), Box<dyn std::error::Error>> {
+//! # async fn run() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 //! sqlx_core::any::driver::install_drivers(&[sqlx_odbc::any::DRIVER])?;
 //!
 //! let mut conn = sqlx_core::any::AnyConnection::connect(
@@ -52,14 +52,14 @@
 //!
 //! To combine split drivers, install all of them once at application startup:
 //!
-//! ```no_run
-//! # fn install() -> Result<(), Box<dyn std::error::Error>> {
+//! ```ignore
+//! fn install() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 //! sqlx_core::any::driver::install_drivers(&[
 //!     sqlx_sqlserver::any::DRIVER,
 //!     sqlx_odbc::any::DRIVER,
 //! ])?;
-//! # Ok(())
-//! # }
+//! Ok(())
+//! }
 //! ```
 //!
 //! # Native ODBC requirements

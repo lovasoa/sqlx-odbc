@@ -27,6 +27,11 @@ fi
 driver="$1"
 shift
 
+DUCKDB_SKIP_ARGS=(
+    --skip sqlx_query_fetches_basic_row_in_buffered_mode_when_configured
+    --skip sqlx_query_decodes_decimal_integer_in_buffered_mode_when_configured
+)
+
 tmp_dir="$(mktemp -d)"
 cleanup() {
     rm -rf "$tmp_dir"
@@ -37,9 +42,24 @@ case "$driver" in
     duckdb)
         duckdb_driver="${DUCKDB_ODBC_DRIVER:-DuckDB}"
         export ODBC_DATABASE_URL="Driver=${duckdb_driver};Database=${tmp_dir}/sqlx-odbc.duckdb"
-        set -- "$@" -- \
-            --skip sqlx_query_fetches_basic_row_in_buffered_mode_when_configured \
-            --skip sqlx_query_decodes_decimal_integer_in_buffered_mode_when_configured
+        cargo_args=()
+        harness_args=()
+        found_separator=0
+
+        for arg in "$@"; do
+            if [[ "$arg" == "--" && "$found_separator" -eq 0 ]]; then
+                found_separator=1
+                continue
+            fi
+
+            if [[ "$found_separator" -eq 0 ]]; then
+                cargo_args+=("$arg")
+            else
+                harness_args+=("$arg")
+            fi
+        done
+
+        set -- "${cargo_args[@]}" -- "${harness_args[@]}" "${DUCKDB_SKIP_ARGS[@]}"
         ;;
     postgres)
         postgres_driver="${POSTGRES_ODBC_DRIVER:-PostgreSQL Unicode}"

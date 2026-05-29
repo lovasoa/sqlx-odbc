@@ -35,6 +35,13 @@ impl From<OdbcError> for sqlx_core::Error {
     }
 }
 
+pub(crate) fn database_error_with_context(
+    error: OdbcApiError,
+    context: impl Into<String>,
+) -> OdbcError {
+    OdbcError::Database(OdbcDatabaseError::with_context(error, context))
+}
+
 /// Database error details extracted from ODBC diagnostics.
 #[derive(Debug)]
 pub struct OdbcDatabaseError {
@@ -44,6 +51,13 @@ pub struct OdbcDatabaseError {
 }
 
 impl OdbcDatabaseError {
+    fn with_context(error: OdbcApiError, context: impl Into<String>) -> Self {
+        let context = context.into();
+        let mut database_error = Self::from(error);
+        database_error.message = format!("{context}: {}", database_error.message);
+        database_error
+    }
+
     fn diagnostic_record(error: &OdbcApiError) -> Option<&Record> {
         match error {
             OdbcApiError::Diagnostics { record, .. } => Some(record),
@@ -95,11 +109,15 @@ impl From<OdbcApiError> for OdbcDatabaseError {
 
 impl Display for OdbcDatabaseError {
     fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
-        Display::fmt(&self.error, f)
+        f.write_str(&self.message)
     }
 }
 
-impl std::error::Error for OdbcDatabaseError {}
+impl std::error::Error for OdbcDatabaseError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.error)
+    }
+}
 
 impl sqlx_core::error::DatabaseError for OdbcDatabaseError {
     fn message(&self) -> &str {
@@ -149,5 +167,27 @@ mod tests {
 
         assert_eq!(error.message(), "syntax error near FROM");
         assert_eq!(error.code().as_deref(), Some("HY000"));
+    }
+
+    #[test]
+    fn database_error_context_is_included_in_message_and_display() {
+        let error = OdbcDatabaseError::with_context(
+            OdbcApiError::Diagnostics {
+                function: "SQLSetStmtAttr",
+                record: Record {
+                    state: State(*b"HY092"),
+                    native_error: 0,
+                    message: sql_chars("invalid attribute option identifier"),
+                },
+            },
+            "ODBC buffered fetching could not be enabled",
+        );
+
+        assert_eq!(
+            error.message(),
+            "ODBC buffered fetching could not be enabled: invalid attribute option identifier"
+        );
+        assert_eq!(error.to_string(), error.message());
+        assert_eq!(error.code().as_deref(), Some("HY092"));
     }
 }

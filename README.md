@@ -21,7 +21,7 @@ use sqlx_core::row::Row;
 use sqlx_odbc::OdbcConnection;
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let mut conn = OdbcConnection::connect("Driver=DuckDB;Database=/tmp/example.duckdb").await?;
 
     let row = sqlx_core::query::query("SELECT 1")
@@ -83,6 +83,10 @@ To test another installed driver, set a connection string and use `custom`:
 ODBC_DATABASE_URL='Driver=ODBC Driver 18 for SQL Server;Server=localhost;TrustServerCertificate=yes' \
     ./scripts/test-driver.sh custom
 ```
+
+DuckDB currently works through the default unbuffered fetch path. Its ODBC
+driver rejects the row-array statement attributes used by buffered fetching, so
+leave `OdbcConnectOptions::max_column_size(None)` for DuckDB.
 
 Useful setup guides:
 
