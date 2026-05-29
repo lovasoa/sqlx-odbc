@@ -42,6 +42,8 @@
 //! - DSN names must be configured in the driver manager's usual files or registry locations.
 //! - Buffered fetching can truncate long text or binary values when `max_column_size` is set.
 
+#![deny(missing_docs)]
+#![deny(rustdoc::broken_intra_doc_links)]
 #![warn(future_incompatible, rust_2018_idioms)]
 
 pub mod any;
