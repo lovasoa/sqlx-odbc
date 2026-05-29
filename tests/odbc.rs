@@ -1,4 +1,4 @@
-use sqlx_core::connection::Connection;
+use sqlx_core::connection::{ConnectOptions, Connection};
 use sqlx_core::executor::Executor;
 use sqlx_core::row::Row;
 use sqlx_core::statement::Statement;
@@ -38,6 +38,23 @@ async fn get_test_conn(
     };
 
     Ok(Some(OdbcConnection::connect(&url).await?))
+}
+
+async fn get_test_conn_with<F>(
+    test_name: &str,
+    configure: F,
+) -> Result<Option<OdbcConnection>, Box<dyn std::error::Error>>
+where
+    F: FnOnce(&mut OdbcConnectOptions),
+{
+    let Some(url) = database_url(test_name) else {
+        return Ok(None);
+    };
+
+    let mut options = OdbcConnectOptions::from_str(&url)?;
+    configure(&mut options);
+
+    Ok(Some(options.connect().await?))
 }
 
 fn any_database_url(test_name: &str) -> Option<String> {
@@ -118,6 +135,26 @@ async fn sqlx_query_fetches_basic_row_when_configured() -> Result<(), Box<dyn st
         .await?;
     let value = ValueRef::to_owned(&row.try_get_raw(0)?);
     assert_eq!(value.as_i64(), Some(1));
+
+    conn.close().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn sqlx_query_fetches_basic_row_in_buffered_mode_when_configured(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let Some(mut conn) = get_test_conn_with("ODBC SQLx buffered row fetch test", |options| {
+        options.batch_size(2).max_column_size(Some(64));
+    })
+    .await?
+    else {
+        return Ok(());
+    };
+
+    let row = sqlx_core::query::query("SELECT 1")
+        .fetch_one(&mut conn)
+        .await?;
+    assert_eq!(row.try_get::<i32, _>(0)?, 1);
 
     conn.close().await?;
     Ok(())

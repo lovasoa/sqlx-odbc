@@ -1,10 +1,11 @@
 use crate::{
-    OdbcArguments, OdbcColumn, OdbcConnectOptions, OdbcParameterCollection, OdbcQueryResult,
-    OdbcRow, OdbcStatement, OdbcTypeInfo, OdbcValue, OdbcValueKind, Result,
+    OdbcArguments, OdbcBufferSettings, OdbcColumn, OdbcConnectOptions, OdbcParameterCollection,
+    OdbcQueryResult, OdbcRow, OdbcStatement, OdbcTypeInfo, OdbcValue, OdbcValueKind, Result,
 };
 use futures_core::future::BoxFuture;
 use futures_core::stream::BoxStream;
 use futures_util::{future, stream, StreamExt};
+use odbc_api::buffers::{AnyColumnBufferSlice, BufferDesc, ColumnarDynBuffer, NullableSlice};
 use odbc_api::{Cursor, DataType, Nullable, ResultSetMetadata};
 use sqlx_core::column::Column;
 use sqlx_core::executor::{Execute, Executor};
@@ -18,6 +19,7 @@ use std::future::Future;
 /// be implemented as the port progresses.
 pub struct OdbcConnection {
     conn: odbc_api::Connection<'static>,
+    buffer_settings: OdbcBufferSettings,
     transaction_depth: usize,
 }
 
@@ -38,6 +40,7 @@ impl OdbcConnection {
 
         Ok(Self {
             conn,
+            buffer_settings: options.buffer_settings,
             transaction_depth: 0,
         })
     }
@@ -129,11 +132,11 @@ impl OdbcConnection {
         let mut statement = self.conn.preallocate().map_err(crate::OdbcError::from)?;
         let parameters = odbc_parameters(arguments);
 
-        if let Some(mut cursor) = statement
+        if let Some(cursor) = statement
             .execute(sql, parameters.as_slice())
             .map_err(crate::OdbcError::from)?
         {
-            return collect_rows(&mut cursor).map(OdbcExecution::Rows);
+            return collect_rows(cursor, self.buffer_settings).map(OdbcExecution::Rows);
         }
 
         let rows_affected = statement
@@ -344,8 +347,250 @@ fn validate_parameter_metadata(
     Ok(())
 }
 
-fn collect_rows(cursor: &mut impl Cursor) -> std::result::Result<Vec<OdbcRow>, sqlx_core::Error> {
-    let columns = collect_columns(cursor)?;
+fn collect_rows<C>(
+    cursor: C,
+    settings: OdbcBufferSettings,
+) -> std::result::Result<Vec<OdbcRow>, sqlx_core::Error>
+where
+    C: Cursor + ResultSetMetadata,
+{
+    if let Some(max_column_size) = settings.max_column_size {
+        collect_rows_buffered(cursor, settings.batch_size, max_column_size)
+    } else {
+        collect_rows_unbuffered(cursor)
+    }
+}
+
+#[derive(Debug)]
+struct ColumnBinding {
+    column: OdbcColumn,
+    buffer_desc: BufferDesc,
+}
+
+fn collect_rows_buffered<C>(
+    cursor: C,
+    batch_size: usize,
+    max_column_size: usize,
+) -> std::result::Result<Vec<OdbcRow>, sqlx_core::Error>
+where
+    C: Cursor + ResultSetMetadata,
+{
+    let mut cursor = cursor;
+    let bindings = build_buffer_bindings(&mut cursor, max_column_size)?;
+    let buffer_descriptions = bindings
+        .iter()
+        .map(|binding| binding.buffer_desc)
+        .collect::<Vec<_>>();
+    let mut row_set_cursor = cursor
+        .bind_buffer(ColumnarDynBuffer::from_descs(
+            batch_size,
+            buffer_descriptions,
+        ))
+        .map_err(crate::OdbcError::from)?;
+    let columns = bindings
+        .iter()
+        .map(|binding| binding.column.clone())
+        .collect::<Vec<_>>();
+    let mut rows = Vec::new();
+
+    while let Some(batch) = row_set_cursor.fetch().map_err(crate::OdbcError::from)? {
+        let column_values = bindings
+            .iter()
+            .enumerate()
+            .map(|(index, binding)| {
+                buffered_column_values(batch.column(index), binding.buffer_desc)
+            })
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+
+        for row_index in 0..batch.num_rows() {
+            let values = column_values
+                .iter()
+                .map(|values| OdbcValue::new(values[row_index].clone()))
+                .collect::<Vec<_>>();
+            rows.push(OdbcRow::new(columns.clone(), values));
+        }
+    }
+
+    Ok(rows)
+}
+
+fn build_buffer_bindings(
+    cursor: &mut impl ResultSetMetadata,
+    max_column_size: usize,
+) -> std::result::Result<Vec<ColumnBinding>, sqlx_core::Error> {
+    collect_columns(cursor).map(|columns| {
+        columns
+            .into_iter()
+            .map(|column| ColumnBinding {
+                buffer_desc: map_buffer_desc(column.type_info().data_type(), max_column_size),
+                column,
+            })
+            .collect()
+    })
+}
+
+fn map_buffer_desc(data_type: DataType, max_column_size: usize) -> BufferDesc {
+    match data_type {
+        DataType::TinyInt | DataType::SmallInt | DataType::Integer | DataType::BigInt => {
+            BufferDesc::I64 { nullable: true }
+        }
+        DataType::Real => BufferDesc::F32 { nullable: true },
+        DataType::Float { .. } | DataType::Double => BufferDesc::F64 { nullable: true },
+        DataType::Bit => BufferDesc::Bit { nullable: true },
+        DataType::Date => BufferDesc::Date { nullable: true },
+        DataType::Time { .. } => BufferDesc::Time { nullable: true },
+        DataType::Timestamp { .. } => BufferDesc::Timestamp { nullable: true },
+        DataType::Binary { .. } | DataType::Varbinary { .. } | DataType::LongVarbinary { .. } => {
+            BufferDesc::Binary {
+                max_bytes: max_column_size,
+            }
+        }
+        DataType::Char { .. }
+        | DataType::WChar { .. }
+        | DataType::Varchar { .. }
+        | DataType::WVarchar { .. }
+        | DataType::LongVarchar { .. }
+        | DataType::WLongVarchar { .. }
+        | DataType::Other { .. }
+        | DataType::Unknown
+        | DataType::Decimal { .. }
+        | DataType::Numeric { .. } => BufferDesc::Text {
+            max_str_len: max_column_size,
+        },
+    }
+}
+
+fn buffered_column_values(
+    slice: AnyColumnBufferSlice<'_>,
+    desc: BufferDesc,
+) -> std::result::Result<Vec<OdbcValueKind>, sqlx_core::Error> {
+    Ok(match desc {
+        BufferDesc::I8 { nullable } => buffered_numeric(&slice, desc, nullable, |value| {
+            OdbcValueKind::TinyInt(value)
+        })?,
+        BufferDesc::I16 { nullable } => buffered_numeric(&slice, desc, nullable, |value| {
+            OdbcValueKind::SmallInt(value)
+        })?,
+        BufferDesc::I32 { nullable } => buffered_numeric(&slice, desc, nullable, |value| {
+            OdbcValueKind::Integer(value)
+        })?,
+        BufferDesc::I64 { nullable } => {
+            buffered_numeric(&slice, desc, nullable, OdbcValueKind::BigInt)?
+        }
+        BufferDesc::U8 { nullable } => buffered_numeric(&slice, desc, nullable, |value: u8| {
+            OdbcValueKind::BigInt(i64::from(value))
+        })?,
+        BufferDesc::F32 { nullable } => {
+            buffered_numeric(&slice, desc, nullable, OdbcValueKind::Real)?
+        }
+        BufferDesc::F64 { nullable } => {
+            buffered_numeric(&slice, desc, nullable, OdbcValueKind::Double)?
+        }
+        BufferDesc::Bit { nullable } => {
+            buffered_numeric(&slice, desc, nullable, |value: odbc_api::Bit| {
+                OdbcValueKind::Bit(value.as_bool())
+            })?
+        }
+        BufferDesc::Date { nullable } => {
+            buffered_numeric(&slice, desc, nullable, OdbcValueKind::Date)?
+        }
+        BufferDesc::Time { nullable } => {
+            buffered_numeric(&slice, desc, nullable, OdbcValueKind::Time)?
+        }
+        BufferDesc::Timestamp { nullable } => {
+            buffered_numeric(&slice, desc, nullable, OdbcValueKind::Timestamp)?
+        }
+        BufferDesc::Text { .. } => {
+            let text = expect_buffer_slice(slice.as_text(), desc)?;
+            text.iter()
+                .map(|value| {
+                    value
+                        .map(|bytes| {
+                            OdbcValueKind::Text(String::from_utf8_lossy(bytes).into_owned())
+                        })
+                        .unwrap_or(OdbcValueKind::Null)
+                })
+                .collect()
+        }
+        BufferDesc::WText { .. } => {
+            let text = expect_buffer_slice(slice.as_wide_text(), desc)?;
+            text.iter()
+                .map(|value| {
+                    value
+                        .map(|chars| OdbcValueKind::Text(String::from_utf16_lossy(chars.into())))
+                        .unwrap_or(OdbcValueKind::Null)
+                })
+                .collect()
+        }
+        BufferDesc::Binary { .. } => {
+            let binary = expect_buffer_slice(slice.as_binary(), desc)?;
+            binary
+                .iter()
+                .map(|value| {
+                    value
+                        .map(|bytes| OdbcValueKind::Binary(bytes.to_vec()))
+                        .unwrap_or(OdbcValueKind::Null)
+                })
+                .collect()
+        }
+        BufferDesc::Numeric => {
+            return Err(sqlx_core::Error::Protocol(format!(
+                "unsupported ODBC buffer descriptor: {desc:?}"
+            )))
+        }
+    })
+}
+
+fn buffered_numeric<T, F>(
+    slice: &AnyColumnBufferSlice<'_>,
+    desc: BufferDesc,
+    nullable: bool,
+    map: F,
+) -> std::result::Result<Vec<OdbcValueKind>, sqlx_core::Error>
+where
+    T: Copy + odbc_api::Pod,
+    F: FnMut(T) -> OdbcValueKind,
+{
+    if nullable {
+        Ok(buffered_nullable_numeric(
+            expect_buffer_slice(slice.as_nullable_slice::<T>(), desc)?,
+            map,
+        ))
+    } else {
+        Ok(expect_buffer_slice(slice.as_slice::<T>(), desc)?
+            .iter()
+            .copied()
+            .map(map)
+            .collect())
+    }
+}
+
+fn buffered_nullable_numeric<T, F>(slice: NullableSlice<'_, T>, mut map: F) -> Vec<OdbcValueKind>
+where
+    T: Copy,
+    F: FnMut(T) -> OdbcValueKind,
+{
+    slice
+        .map(|value| value.copied().map(&mut map).unwrap_or(OdbcValueKind::Null))
+        .collect()
+}
+
+fn expect_buffer_slice<T>(
+    slice: Option<T>,
+    desc: BufferDesc,
+) -> std::result::Result<T, sqlx_core::Error> {
+    slice.ok_or_else(|| {
+        sqlx_core::Error::Protocol(format!(
+            "ODBC column buffer {desc:?} did not match fetched slice"
+        ))
+    })
+}
+
+fn collect_rows_unbuffered<C>(mut cursor: C) -> std::result::Result<Vec<OdbcRow>, sqlx_core::Error>
+where
+    C: Cursor + ResultSetMetadata,
+{
+    let columns = collect_columns(&mut cursor)?;
     let mut rows = Vec::new();
 
     while let Some(mut cursor_row) = cursor.next_row().map_err(crate::OdbcError::from)? {
@@ -436,4 +681,37 @@ where
     row.get_data(column_number, &mut value)
         .map_err(crate::OdbcError::from)?;
     Ok(value.into_opt().map(map).unwrap_or(OdbcValueKind::Null))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn buffered_fetch_maps_numeric_types_to_nullable_64_bit_buffers() {
+        assert!(matches!(
+            map_buffer_desc(DataType::TinyInt, 64),
+            BufferDesc::I64 { nullable: true }
+        ));
+        assert!(matches!(
+            map_buffer_desc(DataType::Integer, 64),
+            BufferDesc::I64 { nullable: true }
+        ));
+        assert!(matches!(
+            map_buffer_desc(DataType::BigInt, 64),
+            BufferDesc::I64 { nullable: true }
+        ));
+    }
+
+    #[test]
+    fn buffered_fetch_uses_configured_limits_for_variable_sized_data() {
+        assert_eq!(
+            map_buffer_desc(DataType::Varchar { length: None }, 32),
+            BufferDesc::Text { max_str_len: 32 }
+        );
+        assert_eq!(
+            map_buffer_desc(DataType::Varbinary { length: None }, 16),
+            BufferDesc::Binary { max_bytes: 16 }
+        );
+    }
 }

@@ -457,7 +457,7 @@ fn value_to_parameter(value: &OdbcArgumentValue) -> Box<dyn InputParameter> {
         OdbcArgumentValue::Timestamp(value) => Box::new(
             WithDataType::new(
                 Nullable::new(*value),
-                odbc_api::DataType::Timestamp { precision: 9 },
+                odbc_api::DataType::Timestamp { precision: 6 },
             )
             .into_parameter(),
         ),
@@ -668,7 +668,7 @@ mod tests {
         );
         assert_eq!(
             collection.as_slice()[2].data_type(),
-            odbc_api::DataType::Timestamp { precision: 9 }
+            odbc_api::DataType::Timestamp { precision: 6 }
         );
     }
 
