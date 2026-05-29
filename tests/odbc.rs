@@ -18,6 +18,10 @@ fn database_url(test_name: &str) -> Option<String> {
     match std::env::var("ODBC_DATABASE_URL") {
         Ok(value) if !value.trim().is_empty() => Some(value),
         _ => {
+            if std::env::var_os("ODBC_TEST_REQUIRED").is_some() {
+                panic!("{test_name} requires ODBC_DATABASE_URL, but it is not set");
+            }
+
             eprintln!("skipping {test_name}: ODBC_DATABASE_URL is not set");
             None
         }

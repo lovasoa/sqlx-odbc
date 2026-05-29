@@ -19,6 +19,9 @@ If `ODBC_DATABASE_URL` is unset or blank, the integration test prints a skip mes
 successfully. The value may be a standard ODBC connection string, a bare DSN name, or `odbc:`
 prefixed for legacy compatibility.
 
+Driver scripts set `ODBC_TEST_REQUIRED=1`, so they fail instead of skipping if
+they cannot produce a connection URL.
+
 Run the same integration tests locally against one known driver:
 
 ```sh

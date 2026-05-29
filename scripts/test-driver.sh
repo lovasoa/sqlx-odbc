@@ -60,4 +60,4 @@ case "$driver" in
 esac
 
 echo "running sqlx-odbc integration tests with driver: ${driver}"
-cargo test --test odbc "$@"
+ODBC_TEST_REQUIRED=1 cargo test --test odbc "$@"
