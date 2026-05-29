@@ -616,6 +616,33 @@ mod tests {
     }
 
     #[test]
+    fn sqlx_arguments_add_encodes_large_text_and_binary_slices() {
+        let mut arguments = OdbcArguments::default();
+        let text = "abc123".repeat(16 * 1024);
+        let bytes = [0_u8, 1, 2, 127, 128, 254, 255];
+
+        sqlx_core::arguments::Arguments::add(&mut arguments, text.as_str()).unwrap();
+        sqlx_core::arguments::Arguments::add(&mut arguments, &bytes[..]).unwrap();
+
+        assert_eq!(
+            arguments.values(),
+            &[
+                OdbcArgumentValue::Text(text),
+                OdbcArgumentValue::Bytes(bytes.to_vec())
+            ]
+        );
+    }
+
+    #[test]
+    fn sqlx_arguments_add_preserves_large_unsigned_values() {
+        let mut arguments = OdbcArguments::default();
+
+        sqlx_core::arguments::Arguments::add(&mut arguments, u64::MAX).unwrap();
+
+        assert_eq!(arguments.values(), &[OdbcArgumentValue::UInt(u64::MAX)]);
+    }
+
+    #[test]
     fn sqlx_arguments_add_encodes_temporal_scalars() {
         let mut arguments = OdbcArguments::default();
         let date = odbc_api::sys::Date {

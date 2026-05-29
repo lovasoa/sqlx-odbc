@@ -213,6 +213,31 @@ async fn sqlx_query_binds_parameter_when_configured() -> Result<(), Box<dyn std:
 }
 
 #[tokio::test]
+async fn sqlx_query_binds_heterogeneous_parameters_when_configured(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let Some(mut conn) = get_test_conn("ODBC SQLx heterogeneous parameter binding test").await?
+    else {
+        return Ok(());
+    };
+
+    let row = sqlx_core::query::query(
+        "SELECT CAST(? AS INTEGER), CAST(? AS VARCHAR(32)), CAST(? AS DOUBLE)",
+    )
+    .bind(7_i32)
+    .bind("odbc-param")
+    .bind(2.5_f64)
+    .fetch_one(&mut conn)
+    .await?;
+
+    assert_eq!(row.try_get::<i32, _>(0)?, 7);
+    assert_eq!(row.try_get::<String, _>(1)?.trim_end(), "odbc-param");
+    assert_eq!(row.try_get::<f64, _>(2)?, 2.5);
+
+    conn.close().await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn sqlx_query_binds_typed_null_when_configured() -> Result<(), Box<dyn std::error::Error>> {
     let Some(mut conn) = get_test_conn("ODBC SQLx typed null binding test").await? else {
         return Ok(());
