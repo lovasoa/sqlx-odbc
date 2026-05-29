@@ -1,48 +1,82 @@
-//! ODBC database driver building blocks for SQLx.
+//! ODBC driver for SQLx.
 //!
-//! This crate is being ported as an independent split driver crate. It intentionally depends on
-//! published crates from crates.io only; it does not depend on a local SQLx checkout.
+//! `sqlx-odbc` connects SQLx to databases exposed through an ODBC driver
+//! manager. Use it directly with `sqlx-core` native APIs, or install its
+//! [`Any` driver][any::DRIVER] when an application wants to open ODBC connection
+//! strings through `AnyConnection`.
 //!
-//! ## Test Setup
+//! # Native connection
 //!
-//! Fast tests do not require an ODBC data source:
+//! ```no_run
+//! use sqlx_core::connection::Connection;
+//! use sqlx_core::row::Row;
+//! use sqlx_odbc::OdbcConnection;
 //!
-//! ```sh
-//! cargo test
+//! # async fn run() -> Result<(), Box<dyn std::error::Error>> {
+//! let mut conn = OdbcConnection::connect("Driver=DuckDB;Database=/tmp/example.duckdb").await?;
+//!
+//! let row = sqlx_core::query::query("SELECT 1")
+//!     .fetch_one(&mut conn)
+//!     .await?;
+//!
+//! let value: i32 = row.try_get(0)?;
+//! assert_eq!(value, 1);
+//!
+//! conn.close().await?;
+//! # Ok(())
+//! # }
 //! ```
 //!
-//! Integration smoke tests use `ODBC_DATABASE_URL` and skip cleanly when it is absent:
+//! `OdbcConnection::connect()` accepts a standard ODBC connection string, a bare
+//! DSN name, or the legacy `odbc:` prefix.
 //!
-//! ```sh
-//! ODBC_DATABASE_URL='DSN=MyDataSource;UID=user;PWD=password' cargo test --test odbc
+//! # `AnyConnection`
+//!
+//! Install this driver before connecting through SQLx `Any` APIs:
+//!
+//! ```no_run
+//! use sqlx_core::connection::Connection;
+//!
+//! # async fn run() -> Result<(), Box<dyn std::error::Error>> {
+//! sqlx_core::any::driver::install_drivers(&[sqlx_odbc::any::DRIVER])?;
+//!
+//! let mut conn = sqlx_core::any::AnyConnection::connect(
+//!     "odbc:Driver=DuckDB;Database=/tmp/example.duckdb",
+//! )
+//! .await?;
+//!
+//! conn.close().await?;
+//! # Ok(())
+//! # }
 //! ```
 //!
-//! To run the same tests locally against a known installed driver:
+//! To combine split drivers, install all of them once at application startup:
 //!
-//! ```sh
-//! scripts/test-driver.sh duckdb
-//! DUCKDB_ODBC_DRIVER=/absolute/path/to/libduckdb_odbc.so scripts/test-driver.sh duckdb
-//! ODBC_DATABASE_URL='DSN=MyDataSource;UID=user;PWD=password' scripts/test-driver.sh custom
+//! ```no_run
+//! # fn install() -> Result<(), Box<dyn std::error::Error>> {
+//! sqlx_core::any::driver::install_drivers(&[
+//!     sqlx_sqlserver::any::DRIVER,
+//!     sqlx_odbc::any::DRIVER,
+//! ])?;
+//! # Ok(())
+//! # }
 //! ```
 //!
-//! `ODBC_DATABASE_URL` may be a standard ODBC connection string, a bare DSN name, or the legacy
-//! `odbc:` form:
+//! # Native ODBC requirements
 //!
-//! ```text
-//! DSN=MyDataSource
-//! Driver={ODBC Driver 17 for SQL Server};Server=localhost;Database=test
-//! FILEDSN=/path/to/file.dsn
-//! odbc:DSN=MyDataSource
-//! MyDataSource
-//! ```
+//! On Linux and macOS, install a driver manager such as unixODBC plus a
+//! database-specific ODBC driver. On Windows, the driver manager is built in,
+//! but the database-specific driver is still required. DSNs can be configured in
+//! the driver manager, or callers can pass a full `Driver=...;...` connection
+//! string.
 //!
-//! Native requirements are provided by the operating system:
+//! Enable the `vendored-unix-odbc` feature to statically link the unixODBC
+//! driver manager into your application on Linux or macOS. The actual database
+//! ODBC driver still needs to be installed and discoverable at runtime.
 //!
-//! - Unix-like systems need an ODBC driver manager such as `unixODBC`.
-//! - A database-specific ODBC driver must be installed and visible to the driver manager.
-//! - DSN names must be configured in the driver manager's usual files or registry locations.
-//! - Buffered fetching can truncate long text or binary values when `max_column_size` is set.
-//! - Enable the `vendored-unix-odbc` feature to statically link the unixODBC driver manager.
+//! Buffered fetching can improve throughput, but long text or binary values may
+//! be truncated when `max_column_size` is set. Use unbuffered mode for values
+//! that may exceed that limit.
 
 #![deny(missing_docs)]
 #![deny(rustdoc::broken_intra_doc_links)]

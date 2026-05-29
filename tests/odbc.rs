@@ -182,6 +182,52 @@ async fn sqlx_query_fetches_basic_row_when_configured() -> Result<(), Box<dyn st
     Ok(())
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn sqlx_runs_independent_connections_in_parallel_when_configured(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let Some(url) = database_url("ODBC async parallelism test") else {
+        return Ok(());
+    };
+
+    let mut tasks = Vec::new();
+
+    for expected in 0_i32..8 {
+        let url = url.clone();
+        tasks.push(tokio::spawn(async move {
+            let mut conn = OdbcConnection::connect(&url).await.map_err(|error| {
+                format!("failed to connect ODBC parallel task {expected}: {error}")
+            })?;
+            let row = sqlx_core::query::query("SELECT CAST(? AS INTEGER)")
+                .bind(expected)
+                .fetch_one(&mut conn)
+                .await
+                .map_err(|error| format!("parallel ODBC query {expected} failed: {error}"))?;
+            let actual = row
+                .try_get::<i32, _>(0)
+                .map_err(|error| format!("parallel ODBC decode {expected} failed: {error}"))?;
+            conn.close().await.map_err(|error| {
+                format!("failed to close ODBC parallel task {expected}: {error}")
+            })?;
+
+            if actual != expected {
+                return Err(format!(
+                    "parallel ODBC task returned {actual}, expected {expected}"
+                ));
+            }
+
+            Ok::<(), String>(())
+        }));
+    }
+
+    for task in tasks {
+        if let Err(message) = task.await? {
+            return Err(std::io::Error::other(message).into());
+        }
+    }
+
+    Ok(())
+}
+
 #[tokio::test]
 async fn sqlx_fetch_many_ends_rows_with_query_result_when_configured(
 ) -> Result<(), Box<dyn std::error::Error>> {
