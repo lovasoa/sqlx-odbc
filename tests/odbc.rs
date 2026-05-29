@@ -5,6 +5,9 @@ use sqlx_core::statement::Statement;
 use sqlx_core::value::ValueRef;
 use sqlx_odbc::{OdbcConnectOptions, OdbcConnection};
 use std::str::FromStr;
+use std::sync::Once;
+
+static ANY_DRIVERS: &[sqlx_core::any::driver::AnyDriver] = &[sqlx_odbc::any::DRIVER];
 
 fn database_url(test_name: &str) -> Option<String> {
     match std::env::var("ODBC_DATABASE_URL") {
@@ -35,6 +38,33 @@ async fn get_test_conn(
     };
 
     Ok(Some(OdbcConnection::connect(&url).await?))
+}
+
+fn any_database_url(test_name: &str) -> Option<String> {
+    database_url(test_name).map(|url| {
+        if url.starts_with("odbc:") {
+            url
+        } else {
+            format!("odbc:{url}")
+        }
+    })
+}
+
+async fn get_any_test_conn(
+    test_name: &str,
+) -> Result<Option<sqlx_core::any::AnyConnection>, Box<dyn std::error::Error>> {
+    static INSTALL: Once = Once::new();
+
+    let Some(url) = any_database_url(test_name) else {
+        return Ok(None);
+    };
+
+    INSTALL.call_once(|| {
+        sqlx_core::any::driver::install_drivers(ANY_DRIVERS)
+            .expect("ODBC Any driver should install once");
+    });
+
+    Ok(Some(sqlx_core::any::AnyConnection::connect(&url).await?))
 }
 
 #[test]
@@ -144,6 +174,22 @@ async fn sqlx_prepare_reports_basic_metadata_when_configured(
         sqlx_core::column::Column::name(&statement.columns()[0]),
         "answer"
     );
+
+    conn.close().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn any_connection_fetches_basic_row_when_configured() -> Result<(), Box<dyn std::error::Error>>
+{
+    let Some(mut conn) = get_any_test_conn("ODBC Any row fetch test").await? else {
+        return Ok(());
+    };
+
+    let row = sqlx_core::query::query("SELECT 1")
+        .fetch_one(&mut conn)
+        .await?;
+    assert_eq!(row.try_get::<i32, _>(0)?, 1);
 
     conn.close().await?;
     Ok(())
