@@ -322,25 +322,26 @@ mod tests {
     #[test]
     fn borrowed_values_decode_basic_scalars() {
         use sqlx_core::decode::Decode;
+        use sqlx_core::value::Value;
 
         let int = OdbcValue::new(OdbcValueKind::BigInt(42));
         assert_eq!(
-            i32::decode(sqlx_core::value::Value::as_ref(&int)).unwrap(),
+            <i32 as Decode<crate::Odbc>>::decode(int.as_ref()).unwrap(),
             42
         );
 
         let truthy = OdbcValue::new(OdbcValueKind::Text("true".to_owned()));
-        assert!(bool::decode(sqlx_core::value::Value::as_ref(&truthy)).unwrap());
+        assert!(<bool as Decode<crate::Odbc>>::decode(truthy.as_ref()).unwrap());
 
         let text = OdbcValue::new(OdbcValueKind::Text("hello".to_owned()));
         assert_eq!(
-            String::decode(sqlx_core::value::Value::as_ref(&text)).unwrap(),
+            <String as Decode<crate::Odbc>>::decode(text.as_ref()).unwrap(),
             "hello"
         );
 
         let bytes = OdbcValue::new(OdbcValueKind::Binary(vec![1, 2, 3]));
         assert_eq!(
-            Vec::<u8>::decode(sqlx_core::value::Value::as_ref(&bytes)).unwrap(),
+            <Vec<u8> as Decode<crate::Odbc>>::decode(bytes.as_ref()).unwrap(),
             vec![1, 2, 3]
         );
     }

@@ -121,7 +121,7 @@ impl OdbcConnection {
         Ok(OdbcStatement::new(sql, columns, usize::from(parameters)))
     }
 
-    fn run_blocking_sql(
+    pub(crate) fn run_blocking_sql(
         &mut self,
         sql: &str,
         arguments: Option<&OdbcArguments>,
@@ -254,7 +254,7 @@ impl<'c> Executor<'c> for &'c mut OdbcConnection {
     }
 }
 
-enum OdbcExecution {
+pub(crate) enum OdbcExecution {
     Done(OdbcQueryResult),
     Rows(Vec<OdbcRow>),
 }
