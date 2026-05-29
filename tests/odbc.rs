@@ -161,6 +161,42 @@ async fn sqlx_query_fetches_basic_row_in_buffered_mode_when_configured(
 }
 
 #[tokio::test]
+async fn sqlx_query_decodes_decimal_integer_when_configured(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let Some(mut conn) = get_test_conn("ODBC SQLx decimal integer decode test").await? else {
+        return Ok(());
+    };
+
+    let row = sqlx_core::query::query("SELECT CAST(42 AS DECIMAL(10, 0))")
+        .fetch_one(&mut conn)
+        .await?;
+    assert_eq!(row.try_get::<i32, _>(0)?, 42);
+
+    conn.close().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn sqlx_query_decodes_decimal_integer_in_buffered_mode_when_configured(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let Some(mut conn) = get_test_conn_with("ODBC SQLx buffered decimal decode test", |options| {
+        options.batch_size(2).max_column_size(Some(64));
+    })
+    .await?
+    else {
+        return Ok(());
+    };
+
+    let row = sqlx_core::query::query("SELECT CAST(42 AS DECIMAL(10, 0))")
+        .fetch_one(&mut conn)
+        .await?;
+    assert_eq!(row.try_get::<i32, _>(0)?, 42);
+
+    conn.close().await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn sqlx_query_binds_parameter_when_configured() -> Result<(), Box<dyn std::error::Error>> {
     let Some(mut conn) = get_test_conn("ODBC SQLx parameter binding test").await? else {
         return Ok(());

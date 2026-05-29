@@ -24,20 +24,26 @@ impl OdbcValue {
 
     /// Returns this value as a signed integer where possible.
     pub fn as_i64(&self) -> Option<i64> {
-        match self.kind {
-            OdbcValueKind::TinyInt(value) => Some(i64::from(value)),
-            OdbcValueKind::SmallInt(value) => Some(i64::from(value)),
-            OdbcValueKind::Integer(value) => Some(i64::from(value)),
-            OdbcValueKind::BigInt(value) => Some(value),
+        match &self.kind {
+            OdbcValueKind::TinyInt(value) => Some(i64::from(*value)),
+            OdbcValueKind::SmallInt(value) => Some(i64::from(*value)),
+            OdbcValueKind::Integer(value) => Some(i64::from(*value)),
+            OdbcValueKind::BigInt(value) => Some(*value),
+            OdbcValueKind::Text(value) => parse_integer_text(value),
             _ => None,
         }
     }
 
     /// Returns this value as `f64` where possible.
     pub fn as_f64(&self) -> Option<f64> {
-        match self.kind {
-            OdbcValueKind::Real(value) => Some(f64::from(value)),
-            OdbcValueKind::Double(value) => Some(value),
+        match &self.kind {
+            OdbcValueKind::Real(value) => Some(f64::from(*value)),
+            OdbcValueKind::Double(value) => Some(*value),
+            OdbcValueKind::TinyInt(value) => Some(f64::from(*value)),
+            OdbcValueKind::SmallInt(value) => Some(f64::from(*value)),
+            OdbcValueKind::Integer(value) => Some(f64::from(*value)),
+            OdbcValueKind::BigInt(value) => Some(*value as f64),
+            OdbcValueKind::Text(value) => value.trim().parse().ok(),
             _ => None,
         }
     }
@@ -240,6 +246,22 @@ fn parse_bool_text(value: &str) -> Option<bool> {
     }
 }
 
+fn parse_integer_text(value: &str) -> Option<i64> {
+    let value = value.trim();
+
+    if let Ok(value) = value.parse() {
+        return Some(value);
+    }
+
+    let (integer, fraction) = value.split_once('.')?;
+
+    if fraction.chars().all(|ch| ch == '0') {
+        integer.parse().ok()
+    } else {
+        None
+    }
+}
+
 /// Supported owned ODBC value kinds.
 #[derive(Debug, Clone, PartialEq)]
 pub enum OdbcValueKind {
@@ -303,6 +325,22 @@ mod tests {
         assert_eq!(OdbcValue::new(OdbcValueKind::SmallInt(2)).as_i64(), Some(2));
         assert_eq!(OdbcValue::new(OdbcValueKind::Integer(3)).as_i64(), Some(3));
         assert_eq!(OdbcValue::new(OdbcValueKind::BigInt(4)).as_i64(), Some(4));
+        assert_eq!(
+            OdbcValue::new(OdbcValueKind::Text("42.000".to_owned())).as_i64(),
+            Some(42)
+        );
+        assert_eq!(
+            OdbcValue::new(OdbcValueKind::Text("42.5".to_owned())).as_i64(),
+            None
+        );
+    }
+
+    #[test]
+    fn text_numeric_values_convert_to_float() {
+        assert_eq!(
+            OdbcValue::new(OdbcValueKind::Text("42.5".to_owned())).as_f64(),
+            Some(42.5)
+        );
     }
 
     #[test]
