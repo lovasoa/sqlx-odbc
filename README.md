@@ -39,6 +39,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 `OdbcConnection::connect()` accepts a standard ODBC connection string, a bare
 DSN name, or the legacy `odbc:` prefix.
 
+## Any Driver
+
+Install this crate explicitly before opening ODBC URLs through SQLx
+`AnyConnection`:
+
+```rust
+use sqlx_core::connection::Connection;
+
+sqlx_core::any::driver::install_drivers(&[sqlx_odbc::any::DRIVER])?;
+
+let mut conn = sqlx_core::any::AnyConnection::connect(
+    "odbc:Driver=DuckDB;Database=/tmp/example.duckdb",
+)
+.await?;
+```
+
 ## ODBC Setup
 
 ODBC uses two native pieces outside this crate:
