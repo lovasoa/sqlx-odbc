@@ -65,14 +65,7 @@ jobs:
           echo "DUCKDB_ODBC_DRIVER=$duckdb_driver" >> "$GITHUB_ENV"
 
       - name: Run ODBC integration tests
-        run: |
-          if [[ "${{ matrix.driver }}" == duckdb ]]; then
-            scripts/test-driver.sh duckdb -- \
-              --skip sqlx_query_fetches_basic_row_in_buffered_mode_when_configured \
-              --skip sqlx_query_decodes_decimal_integer_in_buffered_mode_when_configured
-          else
-            scripts/test-driver.sh "${{ matrix.driver }}"
-          fi
+        run: scripts/test-driver.sh "${{ matrix.driver }}"
 
   publish:
     name: Publish
