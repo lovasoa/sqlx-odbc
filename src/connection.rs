@@ -32,11 +32,20 @@ impl std::fmt::Debug for OdbcConnection {
 impl OdbcConnection {
     /// Opens a blocking ODBC connection with the provided options.
     pub fn connect_blocking(options: &OdbcConnectOptions) -> Result<Self> {
-        let env = odbc_api::environment()
-            .map_err(|error| crate::OdbcError::Configuration(error.to_string()))?;
+        let env = odbc_api::environment().map_err(|error| {
+            crate::OdbcError::Configuration(format!(
+                "failed to initialize the process-wide ODBC environment: {error}"
+            ))
+        })?;
 
-        let conn =
-            env.connect_with_connection_string(options.connection_string(), Default::default())?;
+        let conn = env
+            .connect_with_connection_string(options.connection_string(), Default::default())
+            .map_err(|error| {
+                crate::error::database_error_with_context(
+                    error,
+                    "failed to open ODBC connection using the supplied connection string",
+                )
+            })?;
 
         Ok(Self {
             conn,
@@ -52,13 +61,25 @@ impl OdbcConnection {
             .database_management_system_name()
             .map(|name| ping_query_for_dbms_name(&name))
             .unwrap_or("SELECT 1");
-        self.conn.execute(query, (), None)?;
+        self.conn.execute(query, (), None).map_err(|error| {
+            crate::error::database_error_with_context(
+                error,
+                format!("ODBC ping query failed: `{query}`"),
+            )
+        })?;
         Ok(())
     }
 
     /// Returns the DBMS name reported by the ODBC driver.
     pub fn dbms_name(&self) -> Result<String> {
-        Ok(self.conn.database_management_system_name()?)
+        self.conn
+            .database_management_system_name()
+            .map_err(|error| {
+                crate::error::database_error_with_context(
+                    error,
+                    "failed to read the ODBC DBMS name from SQLGetInfo",
+                )
+            })
     }
 
     pub(crate) fn begin_blocking(&mut self) -> std::result::Result<(), sqlx_core::Error> {
@@ -66,9 +87,12 @@ impl OdbcConnection {
             return Err(sqlx_core::Error::InvalidSavePointStatement);
         }
 
-        self.conn
-            .set_autocommit(false)
-            .map_err(crate::OdbcError::from)?;
+        self.conn.set_autocommit(false).map_err(|error| {
+            crate::error::database_error_with_context(
+                error,
+                "failed to disable ODBC autocommit while beginning a transaction",
+            )
+        })?;
         self.transaction_depth = 1;
         Ok(())
     }
@@ -78,10 +102,18 @@ impl OdbcConnection {
             return Ok(());
         }
 
-        self.conn.commit().map_err(crate::OdbcError::from)?;
-        self.conn
-            .set_autocommit(true)
-            .map_err(crate::OdbcError::from)?;
+        self.conn.commit().map_err(|error| {
+            crate::error::database_error_with_context(
+                error,
+                "failed to commit the active ODBC transaction",
+            )
+        })?;
+        self.conn.set_autocommit(true).map_err(|error| {
+            crate::error::database_error_with_context(
+                error,
+                "failed to restore ODBC autocommit after commit",
+            )
+        })?;
         self.transaction_depth = 0;
         Ok(())
     }
@@ -91,10 +123,18 @@ impl OdbcConnection {
             return Ok(());
         }
 
-        self.conn.rollback().map_err(crate::OdbcError::from)?;
-        self.conn
-            .set_autocommit(true)
-            .map_err(crate::OdbcError::from)?;
+        self.conn.rollback().map_err(|error| {
+            crate::error::database_error_with_context(
+                error,
+                "failed to roll back the active ODBC transaction",
+            )
+        })?;
+        self.conn.set_autocommit(true).map_err(|error| {
+            crate::error::database_error_with_context(
+                error,
+                "failed to restore ODBC autocommit after rollback",
+            )
+        })?;
         self.transaction_depth = 0;
         Ok(())
     }
@@ -119,11 +159,24 @@ impl OdbcConnection {
         &mut self,
         sql: sqlx_core::sql_str::SqlStr,
     ) -> std::result::Result<OdbcStatement, sqlx_core::Error> {
-        let mut prepared = self
-            .conn
-            .prepare(sql.as_str())
-            .map_err(crate::OdbcError::from)?;
-        let parameters = prepared.num_params().map_err(crate::OdbcError::from)?;
+        let mut prepared = self.conn.prepare(sql.as_str()).map_err(|error| {
+            crate::error::database_error_with_context(
+                error,
+                format!(
+                    "failed to prepare ODBC statement: `{}`",
+                    sql_preview(sql.as_str())
+                ),
+            )
+        })?;
+        let parameters = prepared.num_params().map_err(|error| {
+            crate::error::database_error_with_context(
+                error,
+                format!(
+                    "failed to read ODBC parameter metadata for prepared statement: `{}`",
+                    sql_preview(sql.as_str())
+                ),
+            )
+        })?;
         let columns = collect_prepared_columns(&mut prepared, parameters)?;
 
         Ok(OdbcStatement::new(sql, columns, usize::from(parameters)))
@@ -134,19 +187,40 @@ impl OdbcConnection {
         sql: &str,
         arguments: Option<&OdbcArguments>,
     ) -> std::result::Result<OdbcExecution, sqlx_core::Error> {
-        let mut statement = self.conn.preallocate().map_err(crate::OdbcError::from)?;
+        let mut statement = self.conn.preallocate().map_err(|error| {
+            crate::error::database_error_with_context(
+                error,
+                format!(
+                    "failed to allocate an ODBC statement for query: `{}`",
+                    sql_preview(sql)
+                ),
+            )
+        })?;
         let parameters = odbc_parameters(arguments);
 
         if let Some(cursor) = statement
             .execute(sql, parameters.as_slice())
-            .map_err(crate::OdbcError::from)?
+            .map_err(|error| {
+                crate::error::database_error_with_context(
+                    error,
+                    format!("failed to execute ODBC query: `{}`", sql_preview(sql)),
+                )
+            })?
         {
             return collect_rows(cursor, self.buffer_settings).map(OdbcExecution::Rows);
         }
 
         let rows_affected = statement
             .row_count()
-            .map_err(crate::OdbcError::from)?
+            .map_err(|error| {
+                crate::error::database_error_with_context(
+                    error,
+                    format!(
+                        "failed to read ODBC row count for query: `{}`",
+                        sql_preview(sql)
+                    ),
+                )
+            })?
             .unwrap_or(0);
 
         let rows_affected = rows_affected.try_into().map_err(|_| {
@@ -294,7 +368,9 @@ fn ping_query_for_dbms_name(dbms_name: &str) -> &'static str {
 fn collect_columns(
     cursor: &mut impl ResultSetMetadata,
 ) -> std::result::Result<Vec<OdbcColumn>, sqlx_core::Error> {
-    let count = cursor.num_result_cols().map_err(crate::OdbcError::from)?;
+    let count = cursor.num_result_cols().map_err(|error| {
+        crate::error::database_error_with_context(error, "failed to read ODBC result-column count")
+    })?;
     let count = usize::try_from(count).map_err(|_| {
         sqlx_core::Error::Protocol(format!("ODBC returned a negative column count: {count}"))
     })?;
@@ -308,7 +384,12 @@ fn collect_columns(
         let mut description = odbc_api::ColumnDescription::default();
         cursor
             .describe_col(column_number, &mut description)
-            .map_err(crate::OdbcError::from)?;
+            .map_err(|error| {
+                crate::error::database_error_with_context(
+                    error,
+                    format!("failed to describe ODBC result column {column_number}"),
+                )
+            })?;
         let name = description
             .name_to_string()
             .unwrap_or_else(|_| format!("col{ordinal}"));
@@ -364,7 +445,12 @@ fn validate_parameter_metadata(
     for index in 1..=parameter_count {
         prepared
             .describe_prepared_parameter(index)
-            .map_err(crate::OdbcError::from)?;
+            .map_err(|error| {
+                crate::error::database_error_with_context(
+                    error,
+                    format!("failed to describe ODBC parameter {index}"),
+                )
+            })?;
     }
 
     Ok(())
@@ -426,12 +512,21 @@ where
         .collect::<Vec<_>>();
     let mut rows = Vec::new();
 
-    while let Some(batch) = row_set_cursor.fetch().map_err(crate::OdbcError::from)? {
+    while let Some(batch) = row_set_cursor.fetch().map_err(|error| {
+        crate::error::database_error_with_context(error, "ODBC buffered fetch failed")
+    })? {
         let column_values = bindings
             .iter()
             .enumerate()
             .map(|(index, binding)| {
-                buffered_column_values(batch.column(index), binding.buffer_desc)
+                buffered_column_values(batch.column(index), binding).map_err(|error| {
+                    sqlx_core::Error::Protocol(format!(
+                        "ODBC buffered fetch could not convert column {} (`{}`) using buffer {:?}: {error}",
+                        binding.column.ordinal() + 1,
+                        binding.column.name(),
+                        binding.buffer_desc
+                    ))
+                })
             })
             .collect::<std::result::Result<Vec<_>, _>>()?;
 
@@ -495,8 +590,9 @@ fn map_buffer_desc(data_type: DataType, max_column_size: usize) -> BufferDesc {
 
 fn buffered_column_values(
     slice: AnyColumnBufferSlice<'_>,
-    desc: BufferDesc,
+    binding: &ColumnBinding,
 ) -> std::result::Result<Vec<OdbcValueKind>, sqlx_core::Error> {
+    let desc = binding.buffer_desc;
     Ok(match desc {
         BufferDesc::I8 { nullable } => buffered_numeric(&slice, desc, nullable, |value| {
             OdbcValueKind::TinyInt(value)
@@ -626,7 +722,12 @@ where
     let columns = collect_columns(&mut cursor)?;
     let mut rows = Vec::new();
 
-    while let Some(mut cursor_row) = cursor.next_row().map_err(crate::OdbcError::from)? {
+    while let Some(mut cursor_row) = cursor.next_row().map_err(|error| {
+        crate::error::database_error_with_context(
+            error,
+            "ODBC unbuffered fetch failed while reading the next row",
+        )
+    })? {
         let mut values = Vec::with_capacity(columns.len());
 
         for column in &columns {
@@ -634,11 +735,7 @@ where
                 .map_err(|_| {
                     sqlx_core::Error::Protocol("ODBC column index exceeds u16".to_owned())
                 })?;
-            values.push(fetch_value(
-                &mut cursor_row,
-                column_number,
-                column.type_info().data_type(),
-            )?);
+            values.push(fetch_value(&mut cursor_row, column_number, column)?);
         }
 
         rows.push(OdbcRow::new(columns.clone(), values));
@@ -650,35 +747,73 @@ where
 fn fetch_value(
     row: &mut odbc_api::CursorRow<'_>,
     column_number: u16,
-    data_type: DataType,
+    column: &OdbcColumn,
 ) -> std::result::Result<OdbcValue, sqlx_core::Error> {
+    let data_type = column.type_info().data_type();
+
     let kind = match data_type {
         DataType::Bit => {
             let mut value = Nullable::<odbc_api::Bit>::null();
-            row.get_data(column_number, &mut value)
-                .map_err(crate::OdbcError::from)?;
+            row.get_data(column_number, &mut value).map_err(|error| {
+                crate::error::database_error_with_context_lazy(error, || {
+                    fetch_context(column, data_type)
+                })
+            })?;
             value
                 .into_opt()
                 .map(|value| OdbcValueKind::Bit(value.as_bool()))
                 .unwrap_or(OdbcValueKind::Null)
         }
-        DataType::TinyInt => fetch_nullable(row, column_number, OdbcValueKind::TinyInt)?,
-        DataType::SmallInt => fetch_nullable(row, column_number, OdbcValueKind::SmallInt)?,
-        DataType::Integer => fetch_nullable(row, column_number, OdbcValueKind::Integer)?,
-        DataType::BigInt => fetch_nullable(row, column_number, OdbcValueKind::BigInt)?,
-        DataType::Real => fetch_nullable(row, column_number, OdbcValueKind::Real)?,
-        DataType::Float { .. } | DataType::Double => {
-            fetch_nullable(row, column_number, OdbcValueKind::Double)?
+        DataType::TinyInt => fetch_nullable(
+            row,
+            column_number,
+            column,
+            data_type,
+            OdbcValueKind::TinyInt,
+        )?,
+        DataType::SmallInt => fetch_nullable(
+            row,
+            column_number,
+            column,
+            data_type,
+            OdbcValueKind::SmallInt,
+        )?,
+        DataType::Integer => fetch_nullable(
+            row,
+            column_number,
+            column,
+            data_type,
+            OdbcValueKind::Integer,
+        )?,
+        DataType::BigInt => {
+            fetch_nullable(row, column_number, column, data_type, OdbcValueKind::BigInt)?
         }
-        DataType::Date => fetch_nullable(row, column_number, OdbcValueKind::Date)?,
-        DataType::Time { .. } => fetch_nullable(row, column_number, OdbcValueKind::Time)?,
-        DataType::Timestamp { .. } => fetch_nullable(row, column_number, OdbcValueKind::Timestamp)?,
+        DataType::Real => {
+            fetch_nullable(row, column_number, column, data_type, OdbcValueKind::Real)?
+        }
+        DataType::Float { .. } | DataType::Double => {
+            fetch_nullable(row, column_number, column, data_type, OdbcValueKind::Double)?
+        }
+        DataType::Date => {
+            fetch_nullable(row, column_number, column, data_type, OdbcValueKind::Date)?
+        }
+        DataType::Time { .. } => {
+            fetch_nullable(row, column_number, column, data_type, OdbcValueKind::Time)?
+        }
+        DataType::Timestamp { .. } => fetch_nullable(
+            row,
+            column_number,
+            column,
+            data_type,
+            OdbcValueKind::Timestamp,
+        )?,
         DataType::Binary { .. } | DataType::Varbinary { .. } | DataType::LongVarbinary { .. } => {
             let mut value = Vec::new();
-            if row
-                .get_binary(column_number, &mut value)
-                .map_err(crate::OdbcError::from)?
-            {
+            if row.get_binary(column_number, &mut value).map_err(|error| {
+                crate::error::database_error_with_context_lazy(error, || {
+                    fetch_context(column, data_type)
+                })
+            })? {
                 OdbcValueKind::Binary(value)
             } else {
                 OdbcValueKind::Null
@@ -688,7 +823,11 @@ fn fetch_value(
             let mut value = Vec::new();
             if row
                 .get_wide_text(column_number, &mut value)
-                .map_err(crate::OdbcError::from)?
+                .map_err(|error| {
+                    crate::error::database_error_with_context_lazy(error, || {
+                        fetch_context(column, data_type)
+                    })
+                })?
             {
                 OdbcValueKind::Text(String::from_utf16_lossy(&value))
             } else {
@@ -703,6 +842,8 @@ fn fetch_value(
 fn fetch_nullable<T, F>(
     row: &mut odbc_api::CursorRow<'_>,
     column_number: u16,
+    column: &OdbcColumn,
+    data_type: DataType,
     map: F,
 ) -> std::result::Result<OdbcValueKind, sqlx_core::Error>
 where
@@ -711,9 +852,31 @@ where
     F: FnOnce(T) -> OdbcValueKind,
 {
     let mut value = Nullable::<T>::null();
-    row.get_data(column_number, &mut value)
-        .map_err(crate::OdbcError::from)?;
+    row.get_data(column_number, &mut value).map_err(|error| {
+        crate::error::database_error_with_context_lazy(error, || fetch_context(column, data_type))
+    })?;
     Ok(value.into_opt().map(map).unwrap_or(OdbcValueKind::Null))
+}
+
+fn fetch_context(column: &OdbcColumn, data_type: DataType) -> String {
+    format!(
+        "failed to fetch ODBC column {} (`{}`) as {data_type:?}",
+        column.ordinal() + 1,
+        column.name()
+    )
+}
+
+fn sql_preview(sql: &str) -> String {
+    const MAX_LEN: usize = 160;
+
+    let compact = sql.split_whitespace().collect::<Vec<_>>().join(" ");
+    if compact.len() <= MAX_LEN {
+        compact
+    } else {
+        let mut preview = compact.chars().take(MAX_LEN - 3).collect::<String>();
+        preview.push_str("...");
+        preview
+    }
 }
 
 #[cfg(test)]

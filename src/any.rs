@@ -81,28 +81,31 @@ impl AnyConnectionBackend for OdbcConnection {
         _persistent: bool,
         arguments: Option<AnyArguments>,
     ) -> BoxStream<'_, sqlx_core::Result<Either<AnyQueryResult, AnyRow>>> {
-        let arguments = arguments.map(map_arguments);
+        let arguments = arguments.map(map_arguments).transpose();
 
-        stream::once(async move { self.run_blocking_sql(query.as_str(), arguments.as_ref()) })
-            .map(|result| match result {
-                Ok(OdbcExecution::Done(result)) => {
-                    stream::once(future::ready(Ok(Either::Left(map_result(result))))).boxed()
-                }
-                Ok(OdbcExecution::Rows(rows)) => stream::iter(
-                    rows.into_iter()
-                        .map(|row| {
-                            let column_names = column_names(row.columns());
-                            AnyRow::map_from(&row, column_names).map(Either::Right)
-                        })
-                        .chain(std::iter::once(Ok(Either::Left(map_result(
-                            OdbcQueryResult::new(0),
-                        ))))),
-                )
-                .boxed(),
-                Err(error) => stream::once(future::ready(Err(error))).boxed(),
-            })
-            .flatten()
-            .boxed()
+        stream::once(async move {
+            let arguments = arguments?;
+            self.run_blocking_sql(query.as_str(), arguments.as_ref())
+        })
+        .map(|result| match result {
+            Ok(OdbcExecution::Done(result)) => {
+                stream::once(future::ready(Ok(Either::Left(map_result(result))))).boxed()
+            }
+            Ok(OdbcExecution::Rows(rows)) => stream::iter(
+                rows.into_iter()
+                    .map(|row| {
+                        let column_names = column_names(row.columns());
+                        AnyRow::map_from(&row, column_names).map(Either::Right)
+                    })
+                    .chain(std::iter::once(Ok(Either::Left(map_result(
+                        OdbcQueryResult::new(0),
+                    ))))),
+            )
+            .boxed(),
+            Err(error) => stream::once(future::ready(Err(error))).boxed(),
+        })
+        .flatten()
+        .boxed()
     }
 
     fn fetch_optional(
@@ -111,9 +114,10 @@ impl AnyConnectionBackend for OdbcConnection {
         _persistent: bool,
         arguments: Option<AnyArguments>,
     ) -> BoxFuture<'_, sqlx_core::Result<Option<AnyRow>>> {
-        let arguments = arguments.map(map_arguments);
+        let arguments = arguments.map(map_arguments).transpose();
 
         Box::pin(async move {
+            let arguments = arguments?;
             match self.run_blocking_sql(query.as_str(), arguments.as_ref())? {
                 OdbcExecution::Done(_) => Ok(None),
                 OdbcExecution::Rows(rows) => rows
@@ -171,7 +175,10 @@ impl<'a> TryFrom<&'a OdbcTypeInfo> for AnyTypeInfo {
             data_type if data_type.accepts_binary_data() => AnyTypeInfoKind::Blob,
             data_type => {
                 return Err(sqlx_core::Error::AnyDriverError(
-                    format!("Any driver does not support the ODBC type {data_type:?}").into(),
+                    format!(
+                        "ODBC Any conversion does not support result column type {data_type:?}"
+                    )
+                    .into(),
                 ));
             }
         };
@@ -199,7 +206,7 @@ impl<'a> TryFrom<&'a OdbcColumn> for AnyColumn {
     }
 }
 
-fn map_arguments(arguments: AnyArguments) -> OdbcArguments {
+fn map_arguments(arguments: AnyArguments) -> sqlx_core::Result<OdbcArguments> {
     let mut out = OdbcArguments::default();
 
     for value in arguments.values.0 {
@@ -214,11 +221,15 @@ fn map_arguments(arguments: AnyArguments) -> OdbcArguments {
             AnyValueKind::Text(value) => OdbcArgumentValue::Text(value.to_string()),
             AnyValueKind::TextSlice(value) => OdbcArgumentValue::Text(value.to_string()),
             AnyValueKind::Blob(value) => OdbcArgumentValue::Bytes(value.to_vec()),
-            _ => unreachable!("unhandled Any argument value"),
+            other => {
+                return Err(sqlx_core::Error::AnyDriverError(
+                    format!("ODBC Any arguments do not support value kind {other:?}").into(),
+                ))
+            }
         });
     }
 
-    out
+    Ok(out)
 }
 
 fn any_type_to_odbc(kind: AnyTypeInfoKind) -> OdbcTypeInfo {

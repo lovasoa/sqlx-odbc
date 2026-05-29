@@ -42,6 +42,13 @@ pub(crate) fn database_error_with_context(
     OdbcError::Database(OdbcDatabaseError::with_context(error, context))
 }
 
+pub(crate) fn database_error_with_context_lazy(
+    error: OdbcApiError,
+    context: impl FnOnce() -> String,
+) -> OdbcError {
+    OdbcError::Database(OdbcDatabaseError::with_context(error, context()))
+}
+
 /// Database error details extracted from ODBC diagnostics.
 #[derive(Debug)]
 pub struct OdbcDatabaseError {

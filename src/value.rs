@@ -150,10 +150,23 @@ macro_rules! impl_decode_integer {
     ($ty:ty) => {
         impl<'r> sqlx_core::decode::Decode<'r, crate::Odbc> for $ty {
             fn decode(value: OdbcValueRef<'r>) -> Result<Self, sqlx_core::error::BoxDynError> {
-                value
-                    .as_i64()
-                    .and_then(|value| Self::try_from(value).ok())
-                    .ok_or_else(|| format!("ODBC: cannot decode {}", stringify!($ty)).into())
+                let Some(integer) = value.as_i64() else {
+                    return Err(decode_error(
+                        value,
+                        stringify!($ty),
+                        "source value is not an integer",
+                    )
+                    .into());
+                };
+
+                Self::try_from(integer).map_err(|_| {
+                    decode_error(
+                        value,
+                        stringify!($ty),
+                        format!("integer value {integer} is outside the target range"),
+                    )
+                    .into()
+                })
             }
         }
     };
@@ -170,9 +183,9 @@ impl_decode_integer!(u64);
 
 impl<'r> sqlx_core::decode::Decode<'r, crate::Odbc> for bool {
     fn decode(value: OdbcValueRef<'r>) -> Result<Self, sqlx_core::error::BoxDynError> {
-        value
-            .as_bool()
-            .ok_or_else(|| "ODBC: cannot decode bool".into())
+        value.as_bool().ok_or_else(|| {
+            decode_error(value, "bool", "source value is not boolean-compatible").into()
+        })
     }
 }
 
@@ -181,7 +194,7 @@ impl<'r> sqlx_core::decode::Decode<'r, crate::Odbc> for f32 {
         value
             .as_f64()
             .map(|value| value as f32)
-            .ok_or_else(|| "ODBC: cannot decode f32".into())
+            .ok_or_else(|| decode_error(value, "f32", "source value is not numeric").into())
     }
 }
 
@@ -189,7 +202,7 @@ impl<'r> sqlx_core::decode::Decode<'r, crate::Odbc> for f64 {
     fn decode(value: OdbcValueRef<'r>) -> Result<Self, sqlx_core::error::BoxDynError> {
         value
             .as_f64()
-            .ok_or_else(|| "ODBC: cannot decode f64".into())
+            .ok_or_else(|| decode_error(value, "f64", "source value is not numeric").into())
     }
 }
 
@@ -203,7 +216,12 @@ impl<'r> sqlx_core::decode::Decode<'r, crate::Odbc> for String {
             return Ok(String::from_utf8(bytes.to_vec())?);
         }
 
-        Err("ODBC: cannot decode String".into())
+        Err(decode_error(
+            value,
+            "String",
+            "source value is neither text nor UTF-8 bytes",
+        )
+        .into())
     }
 }
 
@@ -213,7 +231,7 @@ impl<'r> sqlx_core::decode::Decode<'r, crate::Odbc> for &'r str {
             return Ok(text);
         }
 
-        Err("ODBC: cannot decode &str".into())
+        Err(decode_error(value, "&str", "source value is not text").into())
     }
 }
 
@@ -222,7 +240,7 @@ impl<'r> sqlx_core::decode::Decode<'r, crate::Odbc> for Vec<u8> {
         value
             .as_bytes()
             .map(<[u8]>::to_vec)
-            .ok_or_else(|| "ODBC: cannot decode Vec<u8>".into())
+            .ok_or_else(|| decode_error(value, "Vec<u8>", "source value is not binary").into())
     }
 }
 
@@ -230,7 +248,7 @@ impl<'r> sqlx_core::decode::Decode<'r, crate::Odbc> for &'r [u8] {
     fn decode(value: OdbcValueRef<'r>) -> Result<Self, sqlx_core::error::BoxDynError> {
         value
             .as_bytes()
-            .ok_or_else(|| "ODBC: cannot decode &[u8]".into())
+            .ok_or_else(|| decode_error(value, "&[u8]", "source value is not binary").into())
     }
 }
 
@@ -238,7 +256,7 @@ impl<'r> sqlx_core::decode::Decode<'r, crate::Odbc> for odbc_api::sys::Date {
     fn decode(value: OdbcValueRef<'r>) -> Result<Self, sqlx_core::error::BoxDynError> {
         match value.value.kind() {
             OdbcValueKind::Date(value) => Ok(*value),
-            _ => Err("ODBC: cannot decode Date".into()),
+            _ => Err(decode_error(value, "Date", "source value is not an ODBC date").into()),
         }
     }
 }
@@ -247,7 +265,7 @@ impl<'r> sqlx_core::decode::Decode<'r, crate::Odbc> for odbc_api::sys::Time {
     fn decode(value: OdbcValueRef<'r>) -> Result<Self, sqlx_core::error::BoxDynError> {
         match value.value.kind() {
             OdbcValueKind::Time(value) => Ok(*value),
-            _ => Err("ODBC: cannot decode Time".into()),
+            _ => Err(decode_error(value, "Time", "source value is not an ODBC time").into()),
         }
     }
 }
@@ -256,9 +274,18 @@ impl<'r> sqlx_core::decode::Decode<'r, crate::Odbc> for odbc_api::sys::Timestamp
     fn decode(value: OdbcValueRef<'r>) -> Result<Self, sqlx_core::error::BoxDynError> {
         match value.value.kind() {
             OdbcValueKind::Timestamp(value) => Ok(*value),
-            _ => Err("ODBC: cannot decode Timestamp".into()),
+            _ => Err(
+                decode_error(value, "Timestamp", "source value is not an ODBC timestamp").into(),
+            ),
         }
     }
+}
+
+fn decode_error(value: OdbcValueRef<'_>, target: &str, reason: impl std::fmt::Display) -> String {
+    format!(
+        "ODBC cannot decode value kind {:?} as {target}: {reason}",
+        value.value.kind()
+    )
 }
 
 fn parse_bool_text(value: &str) -> Option<bool> {
