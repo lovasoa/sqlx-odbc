@@ -13,6 +13,10 @@ use std::sync::Once;
 
 static ANY_DRIVERS: &[sqlx_core::any::driver::AnyDriver] = &[sqlx_odbc::any::DRIVER];
 static TABLE_ID: AtomicU64 = AtomicU64::new(0);
+const MISSING_TABLE_READ: &str = "SELECT contents FROM sqlx_missing_fs WHERE path = ?";
+const MISSING_TABLE_EXISTS: &str = "SELECT 1 FROM sqlx_missing_fs WHERE path = ?";
+const MISSING_TABLE_MODIFIED: &str =
+    "SELECT 1 FROM sqlx_missing_fs WHERE last_modified >= ? AND path = ?";
 
 fn database_url(test_name: &str) -> Option<String> {
     match std::env::var("ODBC_DATABASE_URL") {
@@ -418,6 +422,92 @@ async fn sqlx_prepare_reports_basic_metadata_when_configured(
         .fetch_one(&mut conn)
         .await?;
     assert_eq!(row.try_get::<i32, _>(0)?, 7);
+
+    conn.close().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn prepare_missing_table_does_not_return_empty_metadata_when_configured(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let Some(mut conn) = get_test_conn("ODBC missing-table prepare metadata test").await? else {
+        return Ok(());
+    };
+
+    for sql in [
+        MISSING_TABLE_READ,
+        MISSING_TABLE_EXISTS,
+        MISSING_TABLE_MODIFIED,
+    ] {
+        if let Ok(statement) = (&mut conn)
+            .prepare(sqlx_core::sql_str::SqlStr::from_static(sql))
+            .await
+        {
+            assert!(
+                !statement.columns().is_empty(),
+                "ODBC prepare must not turn a metadata error into zero columns for {sql}"
+            );
+        }
+    }
+
+    conn.close().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn failed_metadata_prepare_does_not_poison_later_execute_when_configured(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let Some(mut conn) = get_test_conn("ODBC failed metadata prepare recovery test").await? else {
+        return Ok(());
+    };
+
+    let _ = (&mut conn)
+        .prepare(sqlx_core::sql_str::SqlStr::from_static(MISSING_TABLE_READ))
+        .await;
+
+    let error = sqlx_core::query::query(MISSING_TABLE_READ)
+        .bind("index.sql")
+        .fetch_optional(&mut conn)
+        .await
+        .expect_err("querying a missing table should fail");
+    let message = error.to_string();
+
+    assert!(
+        message.contains("sqlx_missing_fs"),
+        "failed ODBC prepare metadata poisoned later execute instead of returning a normal missing-table error: {message}"
+    );
+
+    conn.close().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn invalid_query_errors_are_reported_as_database_errors_when_configured(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let Some(mut conn) = get_test_conn("ODBC invalid query error test").await? else {
+        return Ok(());
+    };
+
+    let error = sqlx_core::query::query("SELECT * FROM sqlx_missing_fs")
+        .fetch_optional(&mut conn)
+        .await
+        .expect_err("fetching from a missing table should fail");
+
+    assert!(
+        matches!(error, sqlx_core::error::Error::Database(_)),
+        "{error:?} should be a database error"
+    );
+
+    let error =
+        sqlx_core::query::query("SELECT non_existent_column FROM (SELECT 1 AS existing_column) t")
+            .fetch_optional(&mut conn)
+            .await
+            .expect_err("fetching a missing column should fail");
+
+    assert!(
+        matches!(error, sqlx_core::error::Error::Database(_)),
+        "{error:?} should be a database error"
+    );
 
     conn.close().await?;
     Ok(())
