@@ -17,6 +17,13 @@
 //! ODBC_DATABASE_URL='DSN=MyDataSource;UID=user;PWD=password' cargo test --test odbc
 //! ```
 //!
+//! To run the same tests locally against a known installed driver:
+//!
+//! ```sh
+//! DUCKDB_ODBC_DRIVER=/absolute/path/to/libduckdb_odbc.so scripts/test-driver.sh duckdb
+//! scripts/test-driver.sh sqlite
+//! ```
+//!
 //! `ODBC_DATABASE_URL` may be a standard ODBC connection string, a bare DSN name, or the legacy
 //! `odbc:` form:
 //!

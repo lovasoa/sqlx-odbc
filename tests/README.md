@@ -19,6 +19,17 @@ If `ODBC_DATABASE_URL` is unset or blank, the integration test prints a skip mes
 successfully. The value may be a standard ODBC connection string, a bare DSN name, or `odbc:`
 prefixed for legacy compatibility.
 
+Run the same integration test locally against one known driver:
+
+```sh
+DUCKDB_ODBC_DRIVER=/absolute/path/to/libduckdb_odbc.so scripts/test-driver.sh duckdb
+scripts/test-driver.sh sqlite
+ODBC_DATABASE_URL='DSN=MyDataSource;UID=user;PWD=password' scripts/test-driver.sh custom
+```
+
+The Rust tests intentionally read only `ODBC_DATABASE_URL`. CI covers multiple actual drivers with
+a job matrix that invokes `scripts/test-driver.sh` once per driver.
+
 Native requirements:
 
 - Unix-like systems need an ODBC driver manager such as `unixODBC` or `iODBC`.
