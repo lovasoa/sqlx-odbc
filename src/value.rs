@@ -234,6 +234,33 @@ impl<'r> sqlx_core::decode::Decode<'r, crate::Odbc> for &'r [u8] {
     }
 }
 
+impl<'r> sqlx_core::decode::Decode<'r, crate::Odbc> for odbc_api::sys::Date {
+    fn decode(value: OdbcValueRef<'r>) -> Result<Self, sqlx_core::error::BoxDynError> {
+        match value.value.kind() {
+            OdbcValueKind::Date(value) => Ok(*value),
+            _ => Err("ODBC: cannot decode Date".into()),
+        }
+    }
+}
+
+impl<'r> sqlx_core::decode::Decode<'r, crate::Odbc> for odbc_api::sys::Time {
+    fn decode(value: OdbcValueRef<'r>) -> Result<Self, sqlx_core::error::BoxDynError> {
+        match value.value.kind() {
+            OdbcValueKind::Time(value) => Ok(*value),
+            _ => Err("ODBC: cannot decode Time".into()),
+        }
+    }
+}
+
+impl<'r> sqlx_core::decode::Decode<'r, crate::Odbc> for odbc_api::sys::Timestamp {
+    fn decode(value: OdbcValueRef<'r>) -> Result<Self, sqlx_core::error::BoxDynError> {
+        match value.value.kind() {
+            OdbcValueKind::Timestamp(value) => Ok(*value),
+            _ => Err("ODBC: cannot decode Timestamp".into()),
+        }
+    }
+}
+
 fn parse_bool_text(value: &str) -> Option<bool> {
     match value.trim() {
         "0" | "0.0" | "false" | "FALSE" | "f" | "F" => Some(false),
@@ -381,6 +408,50 @@ mod tests {
         assert_eq!(
             <Vec<u8> as Decode<crate::Odbc>>::decode(bytes.as_ref()).unwrap(),
             vec![1, 2, 3]
+        );
+    }
+
+    #[test]
+    fn borrowed_values_decode_temporal_scalars() {
+        use sqlx_core::decode::Decode;
+        use sqlx_core::value::Value;
+
+        let date = odbc_api::sys::Date {
+            year: 2026,
+            month: 5,
+            day: 29,
+        };
+        let date_value = OdbcValue::new(OdbcValueKind::Date(date));
+        assert_eq!(
+            <odbc_api::sys::Date as Decode<crate::Odbc>>::decode(date_value.as_ref()).unwrap(),
+            date
+        );
+
+        let time = odbc_api::sys::Time {
+            hour: 12,
+            minute: 30,
+            second: 45,
+        };
+        let time_value = OdbcValue::new(OdbcValueKind::Time(time));
+        assert_eq!(
+            <odbc_api::sys::Time as Decode<crate::Odbc>>::decode(time_value.as_ref()).unwrap(),
+            time
+        );
+
+        let timestamp = odbc_api::sys::Timestamp {
+            year: 2026,
+            month: 5,
+            day: 29,
+            hour: 12,
+            minute: 30,
+            second: 45,
+            fraction: 123_456_000,
+        };
+        let timestamp_value = OdbcValue::new(OdbcValueKind::Timestamp(timestamp));
+        assert_eq!(
+            <odbc_api::sys::Timestamp as Decode<crate::Odbc>>::decode(timestamp_value.as_ref())
+                .unwrap(),
+            timestamp
         );
     }
 }

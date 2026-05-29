@@ -436,6 +436,66 @@ impl<'q> sqlx_core::encode::Encode<'q, crate::Odbc> for Vec<u8> {
     }
 }
 
+impl sqlx_core::types::Type<crate::Odbc> for odbc_api::sys::Date {
+    fn type_info() -> crate::OdbcTypeInfo {
+        crate::OdbcTypeInfo::DATE
+    }
+
+    fn compatible(ty: &crate::OdbcTypeInfo) -> bool {
+        matches!(ty.data_type(), odbc_api::DataType::Date)
+    }
+}
+
+impl<'q> sqlx_core::encode::Encode<'q, crate::Odbc> for odbc_api::sys::Date {
+    fn encode_by_ref(
+        &self,
+        buf: &mut Vec<OdbcArgumentValue>,
+    ) -> Result<sqlx_core::encode::IsNull, sqlx_core::error::BoxDynError> {
+        buf.push(OdbcArgumentValue::Date(*self));
+        Ok(sqlx_core::encode::IsNull::No)
+    }
+}
+
+impl sqlx_core::types::Type<crate::Odbc> for odbc_api::sys::Time {
+    fn type_info() -> crate::OdbcTypeInfo {
+        crate::OdbcTypeInfo::TIME
+    }
+
+    fn compatible(ty: &crate::OdbcTypeInfo) -> bool {
+        matches!(ty.data_type(), odbc_api::DataType::Time { .. })
+    }
+}
+
+impl<'q> sqlx_core::encode::Encode<'q, crate::Odbc> for odbc_api::sys::Time {
+    fn encode_by_ref(
+        &self,
+        buf: &mut Vec<OdbcArgumentValue>,
+    ) -> Result<sqlx_core::encode::IsNull, sqlx_core::error::BoxDynError> {
+        buf.push(OdbcArgumentValue::Time(*self));
+        Ok(sqlx_core::encode::IsNull::No)
+    }
+}
+
+impl sqlx_core::types::Type<crate::Odbc> for odbc_api::sys::Timestamp {
+    fn type_info() -> crate::OdbcTypeInfo {
+        crate::OdbcTypeInfo::TIMESTAMP
+    }
+
+    fn compatible(ty: &crate::OdbcTypeInfo) -> bool {
+        matches!(ty.data_type(), odbc_api::DataType::Timestamp { .. })
+    }
+}
+
+impl<'q> sqlx_core::encode::Encode<'q, crate::Odbc> for odbc_api::sys::Timestamp {
+    fn encode_by_ref(
+        &self,
+        buf: &mut Vec<OdbcArgumentValue>,
+    ) -> Result<sqlx_core::encode::IsNull, sqlx_core::error::BoxDynError> {
+        buf.push(OdbcArgumentValue::Timestamp(*self));
+        Ok(sqlx_core::encode::IsNull::No)
+    }
+}
+
 fn value_to_parameter(value: &OdbcArgumentValue) -> Box<dyn InputParameter> {
     match value {
         OdbcArgumentValue::Text(value) => Box::new(value.clone().into_parameter()),
@@ -551,6 +611,43 @@ mod tests {
                 OdbcArgumentValue::Int(7),
                 OdbcArgumentValue::Text("abc".to_owned()),
                 OdbcArgumentValue::Bytes(vec![1, 2, 3])
+            ]
+        );
+    }
+
+    #[test]
+    fn sqlx_arguments_add_encodes_temporal_scalars() {
+        let mut arguments = OdbcArguments::default();
+        let date = odbc_api::sys::Date {
+            year: 2026,
+            month: 5,
+            day: 29,
+        };
+        let time = odbc_api::sys::Time {
+            hour: 12,
+            minute: 30,
+            second: 45,
+        };
+        let timestamp = odbc_api::sys::Timestamp {
+            year: 2026,
+            month: 5,
+            day: 29,
+            hour: 12,
+            minute: 30,
+            second: 45,
+            fraction: 123_456_000,
+        };
+
+        sqlx_core::arguments::Arguments::add(&mut arguments, date).unwrap();
+        sqlx_core::arguments::Arguments::add(&mut arguments, time).unwrap();
+        sqlx_core::arguments::Arguments::add(&mut arguments, timestamp).unwrap();
+
+        assert_eq!(
+            arguments.values(),
+            &[
+                OdbcArgumentValue::Date(date),
+                OdbcArgumentValue::Time(time),
+                OdbcArgumentValue::Timestamp(timestamp)
             ]
         );
     }
