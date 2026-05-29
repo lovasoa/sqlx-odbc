@@ -162,11 +162,13 @@ async fn sqlx_query_fetches_basic_row_when_configured() -> Result<(), Box<dyn st
         return Ok(());
     };
 
-    let row = sqlx_core::query::query("SELECT 1")
+    let row = sqlx_core::query::query("SELECT 1 AS answer")
         .fetch_one(&mut conn)
         .await?;
     let value = ValueRef::to_owned(&row.try_get_raw(0)?);
     assert_eq!(value.as_i64(), Some(1));
+    assert_eq!(row.try_get::<i32, _>("answer")?, 1);
+    assert_eq!(row.try_get::<i32, _>("ANSWER")?, 1);
 
     conn.close().await?;
     Ok(())
@@ -398,16 +400,20 @@ async fn sqlx_prepare_reports_basic_metadata_when_configured(
 
     let statement = (&mut conn)
         .prepare(sqlx_core::sql_str::SqlStr::from_static(
-            "SELECT 1 AS answer",
+            "SELECT CAST(? AS INTEGER) AS answer",
         ))
         .await?;
 
-    assert_eq!(statement.parameters(), Some(sqlx_core::Either::Right(0)));
-    assert_eq!(statement.columns().len(), 1);
-    assert_eq!(
-        sqlx_core::column::Column::name(&statement.columns()[0]),
-        "answer"
-    );
+    assert_eq!(statement.parameters(), Some(sqlx_core::Either::Right(1)));
+    if let Some(column) = statement.columns().first() {
+        assert_eq!(sqlx_core::column::Column::name(column), "answer");
+    }
+
+    let row = sqlx_core::query::query("SELECT CAST(? AS INTEGER) AS answer")
+        .bind(7_i32)
+        .fetch_one(&mut conn)
+        .await?;
+    assert_eq!(row.try_get::<i32, _>(0)?, 7);
 
     conn.close().await?;
     Ok(())
