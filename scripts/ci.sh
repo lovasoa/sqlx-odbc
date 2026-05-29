@@ -9,3 +9,4 @@ cargo fmt --check
 cargo test --locked --all-features
 cargo clippy --locked --all-targets --all-features -- -D warnings
 cargo rustdoc --locked --all-features -- -D missing_docs -D rustdoc::broken_intra_doc_links
+cargo package --locked --allow-dirty
