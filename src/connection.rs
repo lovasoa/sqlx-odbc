@@ -414,7 +414,8 @@ where
                 error,
                 format!(
                     "ODBC buffered fetching could not be enabled with batch_size={batch_size}; \
-                     this driver may not support row-array statement attributes, so use \
+                     this driver may reject the row-array or row-binding statement attributes \
+                     used for column-wise buffered fetching, so use \
                      OdbcConnectOptions::max_column_size(None) to fetch rows unbuffered"
                 ),
             )

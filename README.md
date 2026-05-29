@@ -84,9 +84,9 @@ ODBC_DATABASE_URL='Driver=ODBC Driver 18 for SQL Server;Server=localhost;TrustSe
     ./scripts/test-driver.sh custom
 ```
 
-DuckDB currently works through the default unbuffered fetch path. Its ODBC
-driver rejects the row-array statement attributes used by buffered fetching, so
-leave `OdbcConnectOptions::max_column_size(None)` for DuckDB.
+DuckDB currently works through the default unbuffered fetch path. Some DuckDB
+ODBC builds reject the column-wise row binding attribute used by buffered
+fetching, so leave `OdbcConnectOptions::max_column_size(None)` for DuckDB.
 
 Useful setup guides:
 
