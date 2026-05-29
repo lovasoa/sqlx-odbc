@@ -3,7 +3,7 @@ name = "sqlx-odbc"
 version = "0.1.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/launchbadge/sqlx"
+repository = "https://github.com/lovasoa/sqlx-odbc"
 description = "ODBC driver implementation for SQLx."
 rust-version = "1.82"
 
