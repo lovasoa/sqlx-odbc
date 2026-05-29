@@ -2,14 +2,17 @@ use futures_util::TryStreamExt;
 use sqlx_core::connection::{ConnectOptions, Connection};
 use sqlx_core::executor::Executor;
 use sqlx_core::row::Row;
+use sqlx_core::sql_str::AssertSqlSafe;
 use sqlx_core::statement::Statement;
 use sqlx_core::value::ValueRef;
 use sqlx_core::Either;
 use sqlx_odbc::{OdbcConnectOptions, OdbcConnection};
 use std::str::FromStr;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Once;
 
 static ANY_DRIVERS: &[sqlx_core::any::driver::AnyDriver] = &[sqlx_odbc::any::DRIVER];
+static TABLE_ID: AtomicU64 = AtomicU64::new(0);
 
 fn database_url(test_name: &str) -> Option<String> {
     match std::env::var("ODBC_DATABASE_URL") {
@@ -84,6 +87,33 @@ async fn get_any_test_conn(
     });
 
     Ok(Some(sqlx_core::any::AnyConnection::connect(&url).await?))
+}
+
+fn test_table_name(prefix: &str) -> String {
+    let id = TABLE_ID.fetch_add(1, Ordering::Relaxed);
+    format!("sqlx_odbc_{prefix}_{}_{}", std::process::id(), id)
+}
+
+async fn drop_table_if_exists(
+    conn: &mut OdbcConnection,
+    table: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let sql = format!("DROP TABLE IF EXISTS {table}");
+    sqlx_core::query::query(AssertSqlSafe(sql))
+        .execute(conn)
+        .await?;
+    Ok(())
+}
+
+async fn count_rows(
+    conn: &mut OdbcConnection,
+    table: &str,
+) -> Result<i64, Box<dyn std::error::Error>> {
+    let sql = format!("SELECT COUNT(*) FROM {table}");
+    let row = sqlx_core::query::query(AssertSqlSafe(sql))
+        .fetch_one(conn)
+        .await?;
+    Ok(row.try_get::<i64, _>(0)?)
 }
 
 #[test]
@@ -277,6 +307,84 @@ async fn sqlx_query_binds_typed_null_when_configured() -> Result<(), Box<dyn std
         .await?;
     assert!(row.try_get_raw(0)?.is_null());
 
+    conn.close().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn sqlx_execute_reports_rows_affected_when_configured(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let Some(mut conn) = get_test_conn("ODBC SQLx rows affected test").await? else {
+        return Ok(());
+    };
+
+    let table = test_table_name("rows_affected");
+    drop_table_if_exists(&mut conn, &table).await?;
+    let create = format!("CREATE TABLE {table} (id INTEGER)");
+    sqlx_core::query::query(AssertSqlSafe(create))
+        .execute(&mut conn)
+        .await?;
+
+    let insert = format!("INSERT INTO {table} (id) VALUES (?)");
+    let result = sqlx_core::query::query(AssertSqlSafe(insert.as_str()))
+        .bind(1_i32)
+        .execute(&mut conn)
+        .await?;
+    assert_eq!(result.rows_affected(), 1);
+
+    let update = format!("UPDATE {table} SET id = id + 10 WHERE id = ?");
+    let result = sqlx_core::query::query(AssertSqlSafe(update))
+        .bind(1_i32)
+        .execute(&mut conn)
+        .await?;
+    assert_eq!(result.rows_affected(), 1);
+
+    let delete = format!("DELETE FROM {table} WHERE id = ?");
+    let result = sqlx_core::query::query(AssertSqlSafe(delete))
+        .bind(11_i32)
+        .execute(&mut conn)
+        .await?;
+    assert_eq!(result.rows_affected(), 1);
+
+    assert_eq!(count_rows(&mut conn, &table).await?, 0);
+    drop_table_if_exists(&mut conn, &table).await?;
+
+    conn.close().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn sqlx_transactions_commit_and_rollback_data_when_configured(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let Some(mut conn) = get_test_conn("ODBC SQLx transaction data test").await? else {
+        return Ok(());
+    };
+
+    let table = test_table_name("transactions");
+    drop_table_if_exists(&mut conn, &table).await?;
+    let create = format!("CREATE TABLE {table} (id INTEGER)");
+    sqlx_core::query::query(AssertSqlSafe(create))
+        .execute(&mut conn)
+        .await?;
+
+    let insert = format!("INSERT INTO {table} (id) VALUES (?)");
+    let mut tx = conn.begin().await?;
+    sqlx_core::query::query(AssertSqlSafe(insert.as_str()))
+        .bind(1_i32)
+        .execute(&mut *tx)
+        .await?;
+    tx.rollback().await?;
+    assert_eq!(count_rows(&mut conn, &table).await?, 0);
+
+    let mut tx = conn.begin().await?;
+    sqlx_core::query::query(AssertSqlSafe(insert.as_str()))
+        .bind(2_i32)
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    assert_eq!(count_rows(&mut conn, &table).await?, 1);
+
+    drop_table_if_exists(&mut conn, &table).await?;
     conn.close().await?;
     Ok(())
 }
