@@ -9,7 +9,7 @@ Run fast unit tests:
 cargo test
 ```
 
-Run the ODBC smoke integration test:
+Run the ODBC integration tests:
 
 ```sh
 ODBC_DATABASE_URL='DSN=MyDataSource;UID=user;PWD=password' cargo test --test odbc
@@ -19,13 +19,16 @@ If `ODBC_DATABASE_URL` is unset or blank, the integration test prints a skip mes
 successfully. The value may be a standard ODBC connection string, a bare DSN name, or `odbc:`
 prefixed for legacy compatibility.
 
-Run the same integration test locally against one known driver:
+Run the same integration tests locally against one known driver:
 
 ```sh
 DUCKDB_ODBC_DRIVER=/absolute/path/to/libduckdb_odbc.so scripts/test-driver.sh duckdb
 scripts/test-driver.sh sqlite
 ODBC_DATABASE_URL='DSN=MyDataSource;UID=user;PWD=password' scripts/test-driver.sh custom
 ```
+
+On macOS, the DuckDB driver path normally points to `libduckdb_odbc.dylib` instead of the Linux
+`.so` file. The script accepts any absolute driver library path in `DUCKDB_ODBC_DRIVER`.
 
 The Rust tests intentionally read only `ODBC_DATABASE_URL`. CI covers multiple actual drivers with
 a job matrix that invokes `scripts/test-driver.sh` once per driver.

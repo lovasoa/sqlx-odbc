@@ -202,7 +202,7 @@ async fn sqlx_query_binds_parameter_when_configured() -> Result<(), Box<dyn std:
         return Ok(());
     };
 
-    let row = sqlx_core::query::query("SELECT ?")
+    let row = sqlx_core::query::query("SELECT CAST(? AS INTEGER)")
         .bind(7_i32)
         .fetch_one(&mut conn)
         .await?;
@@ -218,7 +218,7 @@ async fn sqlx_query_binds_typed_null_when_configured() -> Result<(), Box<dyn std
         return Ok(());
     };
 
-    let row = sqlx_core::query::query("SELECT ?")
+    let row = sqlx_core::query::query("SELECT CAST(? AS INTEGER)")
         .bind(Option::<i32>::None)
         .fetch_one(&mut conn)
         .await?;
