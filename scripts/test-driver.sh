@@ -13,7 +13,7 @@ Runs the ODBC integration test against one configured driver by setting
 ODBC_DATABASE_URL for this process.
 
 Drivers:
-  duckdb   Requires DUCKDB_ODBC_DRIVER=/absolute/path/to/libduckdb_odbc library
+  duckdb   Uses DUCKDB_ODBC_DRIVER, defaulting to the registered DuckDB driver
   sqlite   Uses SQLITE_ODBC_DRIVER, defaulting to SQLite3
   custom   Requires ODBC_DATABASE_URL to already be set
 USAGE
@@ -35,8 +35,8 @@ trap cleanup EXIT
 
 case "$driver" in
     duckdb)
-        : "${DUCKDB_ODBC_DRIVER:?DUCKDB_ODBC_DRIVER must point to the DuckDB ODBC driver library}"
-        export ODBC_DATABASE_URL="Driver=${DUCKDB_ODBC_DRIVER};Database=${tmp_dir}/sqlx-odbc.duckdb"
+        duckdb_driver="${DUCKDB_ODBC_DRIVER:-DuckDB}"
+        export ODBC_DATABASE_URL="Driver=${duckdb_driver};Database=${tmp_dir}/sqlx-odbc.duckdb"
         ;;
     sqlite)
         sqlite_driver="${SQLITE_ODBC_DRIVER:-SQLite3}"

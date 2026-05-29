@@ -22,13 +22,16 @@ prefixed for legacy compatibility.
 Run the same integration tests locally against one known driver:
 
 ```sh
+scripts/test-driver.sh duckdb
 DUCKDB_ODBC_DRIVER=/absolute/path/to/libduckdb_odbc.so scripts/test-driver.sh duckdb
 scripts/test-driver.sh sqlite
 ODBC_DATABASE_URL='DSN=MyDataSource;UID=user;PWD=password' scripts/test-driver.sh custom
 ```
 
-On macOS, the DuckDB driver path normally points to `libduckdb_odbc.dylib` instead of the Linux
-`.so` file. The script accepts any absolute driver library path in `DUCKDB_ODBC_DRIVER`.
+The DuckDB script target defaults to the registered `DuckDB` driver name. Set
+`DUCKDB_ODBC_DRIVER` when the driver is not registered or when you want to force a specific driver
+library path. On macOS, that path normally points to `libduckdb_odbc.dylib` instead of the Linux
+`.so` file.
 
 The Rust tests intentionally read only `ODBC_DATABASE_URL`. CI covers multiple actual drivers with
 a job matrix that invokes `scripts/test-driver.sh` once per driver.
