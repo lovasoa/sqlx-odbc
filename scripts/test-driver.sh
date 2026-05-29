@@ -37,7 +37,7 @@ case "$driver" in
     duckdb)
         duckdb_driver="${DUCKDB_ODBC_DRIVER:-DuckDB}"
         export ODBC_DATABASE_URL="Driver=${duckdb_driver};Database=${tmp_dir}/sqlx-odbc.duckdb"
-        set -- "$@" \
+        set -- "$@" -- \
             --skip sqlx_query_fetches_basic_row_in_buffered_mode_when_configured \
             --skip sqlx_query_decodes_decimal_integer_in_buffered_mode_when_configured
         ;;
