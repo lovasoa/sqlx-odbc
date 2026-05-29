@@ -22,7 +22,7 @@
 //! ```sh
 //! scripts/test-driver.sh duckdb
 //! DUCKDB_ODBC_DRIVER=/absolute/path/to/libduckdb_odbc.so scripts/test-driver.sh duckdb
-//! scripts/test-driver.sh sqlite
+//! ODBC_DATABASE_URL='DSN=MyDataSource;UID=user;PWD=password' scripts/test-driver.sh custom
 //! ```
 //!
 //! `ODBC_DATABASE_URL` may be a standard ODBC connection string, a bare DSN name, or the legacy
@@ -38,10 +38,11 @@
 //!
 //! Native requirements are provided by the operating system:
 //!
-//! - Unix-like systems need an ODBC driver manager such as `unixODBC` or `iODBC`.
+//! - Unix-like systems need an ODBC driver manager such as `unixODBC`.
 //! - A database-specific ODBC driver must be installed and visible to the driver manager.
 //! - DSN names must be configured in the driver manager's usual files or registry locations.
 //! - Buffered fetching can truncate long text or binary values when `max_column_size` is set.
+//! - Enable the `vendored-unix-odbc` feature to statically link the unixODBC driver manager.
 
 #![deny(missing_docs)]
 #![deny(rustdoc::broken_intra_doc_links)]

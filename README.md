@@ -12,7 +12,7 @@ to crates.io and is not wired into the `sqlx` facade crate, so examples use
 [dependencies]
 sqlx-odbc = "0.1"
 sqlx-core = "=0.9.0"
-tokio = { version = "1", features = ["macros", "rt"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 ```
 
 ```rust

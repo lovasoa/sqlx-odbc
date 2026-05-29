@@ -47,7 +47,12 @@ impl OdbcConnection {
 
     /// Executes a minimal connectivity query.
     pub fn ping_blocking(&mut self) -> Result<()> {
-        self.conn.execute("SELECT 1", (), None)?;
+        let query = self
+            .conn
+            .database_management_system_name()
+            .map(|name| ping_query_for_dbms_name(&name))
+            .unwrap_or("SELECT 1");
+        self.conn.execute(query, (), None)?;
         Ok(())
     }
 
@@ -266,6 +271,21 @@ fn odbc_parameters(arguments: Option<&OdbcArguments>) -> OdbcParameterCollection
     arguments
         .map(OdbcArguments::to_odbc_parameter_collection)
         .unwrap_or_default()
+}
+
+fn ping_query_for_dbms_name(dbms_name: &str) -> &'static str {
+    let dbms_name = dbms_name.to_ascii_uppercase();
+
+    if dbms_name.contains("DB2")
+        || dbms_name.contains("DB/2")
+        || dbms_name.contains("ISERIES")
+        || dbms_name.contains("AS/400")
+        || dbms_name.contains("IBM I")
+    {
+        "SELECT 1 FROM SYSIBM.SYSDUMMY1"
+    } else {
+        "SELECT 1"
+    }
 }
 
 fn collect_columns(
@@ -713,5 +733,36 @@ mod tests {
             map_buffer_desc(DataType::Varbinary { length: None }, 16),
             BufferDesc::Binary { max_bytes: 16 }
         );
+    }
+
+    #[test]
+    fn ping_query_uses_db2_dummy_table_for_db2_drivers() {
+        assert_eq!(
+            "SELECT 1 FROM SYSIBM.SYSDUMMY1",
+            ping_query_for_dbms_name("DB2")
+        );
+        assert_eq!(
+            "SELECT 1 FROM SYSIBM.SYSDUMMY1",
+            ping_query_for_dbms_name("DB2 UDB for AS/400")
+        );
+        assert_eq!(
+            "SELECT 1 FROM SYSIBM.SYSDUMMY1",
+            ping_query_for_dbms_name("IBM DB2 for i")
+        );
+        assert_eq!(
+            "SELECT 1 FROM SYSIBM.SYSDUMMY1",
+            ping_query_for_dbms_name("iSeries")
+        );
+        assert_eq!(
+            "SELECT 1 FROM SYSIBM.SYSDUMMY1",
+            ping_query_for_dbms_name("IBM i")
+        );
+    }
+
+    #[test]
+    fn ping_query_keeps_select_one_for_non_db2_drivers() {
+        assert_eq!("SELECT 1", ping_query_for_dbms_name("DuckDB"));
+        assert_eq!("SELECT 1", ping_query_for_dbms_name("Microsoft SQL Server"));
+        assert_eq!("SELECT 1", ping_query_for_dbms_name("PostgreSQL"));
     }
 }
