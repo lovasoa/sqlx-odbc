@@ -60,6 +60,7 @@ impl OdbcValue {
     pub fn as_bytes(&self) -> Option<Cow<'_, [u8]>> {
         match &self.kind {
             OdbcValueKind::Binary(value) => Some(Cow::Borrowed(value)),
+            OdbcValueKind::Text(value) => Some(Cow::Borrowed(value.as_bytes())),
             _ => None,
         }
     }
@@ -110,6 +111,7 @@ impl<'r> OdbcValueRef<'r> {
     pub fn as_bytes(&self) -> Option<&'r [u8]> {
         match &self.value.kind {
             OdbcValueKind::Binary(value) => Some(value),
+            OdbcValueKind::Text(value) => Some(value.as_bytes()),
             _ => None,
         }
     }
@@ -401,6 +403,7 @@ mod tests {
     fn text_and_bytes_borrow_from_value() {
         let text = OdbcValue::new(OdbcValueKind::Text("hello".to_owned()));
         assert_eq!(text.as_str().as_deref(), Some("hello"));
+        assert_eq!(text.as_bytes().as_deref(), Some(b"hello".as_slice()));
 
         let bytes = OdbcValue::new(OdbcValueKind::Binary(vec![1, 2, 3]));
         assert_eq!(bytes.as_bytes().as_deref(), Some(&[1, 2, 3][..]));
@@ -436,6 +439,72 @@ mod tests {
             <Vec<u8> as Decode<crate::Odbc>>::decode(bytes.as_ref()).unwrap(),
             vec![1, 2, 3]
         );
+
+        let bytes_from_text = OdbcValue::new(OdbcValueKind::Text("abc".to_owned()));
+        assert_eq!(
+            <Vec<u8> as Decode<crate::Odbc>>::decode(bytes_from_text.as_ref()).unwrap(),
+            b"abc".to_vec()
+        );
+        assert_eq!(
+            <&[u8] as Decode<crate::Odbc>>::decode(bytes_from_text.as_ref()).unwrap(),
+            b"abc".as_slice()
+        );
+    }
+
+    #[test]
+    fn borrowed_values_decode_bool_variants() {
+        use sqlx_core::decode::Decode;
+        use sqlx_core::value::Value;
+
+        for value in [
+            OdbcValueKind::Bit(true),
+            OdbcValueKind::TinyInt(1),
+            OdbcValueKind::SmallInt(-1),
+            OdbcValueKind::Integer(42),
+            OdbcValueKind::BigInt(1),
+            OdbcValueKind::Real(1.0),
+            OdbcValueKind::Double(42.5),
+            OdbcValueKind::Text("true".to_owned()),
+            OdbcValueKind::Text("TRUE".to_owned()),
+            OdbcValueKind::Text("t".to_owned()),
+            OdbcValueKind::Text("1".to_owned()),
+            OdbcValueKind::Text("1.0".to_owned()),
+            OdbcValueKind::Text(" 42 ".to_owned()),
+        ] {
+            let value = OdbcValue::new(value);
+            assert!(<bool as Decode<crate::Odbc>>::decode(value.as_ref()).unwrap());
+        }
+
+        for value in [
+            OdbcValueKind::Bit(false),
+            OdbcValueKind::TinyInt(0),
+            OdbcValueKind::SmallInt(0),
+            OdbcValueKind::Integer(0),
+            OdbcValueKind::BigInt(0),
+            OdbcValueKind::Real(0.0),
+            OdbcValueKind::Double(0.0),
+            OdbcValueKind::Text("false".to_owned()),
+            OdbcValueKind::Text("FALSE".to_owned()),
+            OdbcValueKind::Text("f".to_owned()),
+            OdbcValueKind::Text("0".to_owned()),
+            OdbcValueKind::Text("0.0".to_owned()),
+            OdbcValueKind::Text(" 0 ".to_owned()),
+        ] {
+            let value = OdbcValue::new(value);
+            assert!(!<bool as Decode<crate::Odbc>>::decode(value.as_ref()).unwrap());
+        }
+    }
+
+    #[test]
+    fn borrowed_values_reject_invalid_bool_text() {
+        use sqlx_core::decode::Decode;
+        use sqlx_core::value::Value;
+
+        let value = OdbcValue::new(OdbcValueKind::Text("not a bool".to_owned()));
+        let error = <bool as Decode<crate::Odbc>>::decode(value.as_ref()).unwrap_err();
+
+        assert!(error.to_string().contains("bool"));
+        assert!(error.to_string().contains("not boolean-compatible"));
     }
 
     #[test]

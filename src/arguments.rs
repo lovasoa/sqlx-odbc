@@ -406,13 +406,17 @@ impl sqlx_core::types::Type<crate::Odbc> for [u8] {
     }
 
     fn compatible(ty: &crate::OdbcTypeInfo) -> bool {
-        ty.data_type().accepts_binary_data()
+        ty.data_type().accepts_binary_data() || ty.data_type().accepts_character_data()
     }
 }
 
 impl sqlx_core::types::Type<crate::Odbc> for Vec<u8> {
     fn type_info() -> crate::OdbcTypeInfo {
         <[u8] as sqlx_core::types::Type<crate::Odbc>>::type_info()
+    }
+
+    fn compatible(ty: &crate::OdbcTypeInfo) -> bool {
+        <[u8] as sqlx_core::types::Type<crate::Odbc>>::compatible(ty)
     }
 }
 
@@ -631,6 +635,22 @@ mod tests {
                 OdbcArgumentValue::Bytes(bytes.to_vec())
             ]
         );
+    }
+
+    #[test]
+    fn byte_types_are_compatible_with_text_and_binary_columns() {
+        use sqlx_core::types::Type;
+
+        let binary = crate::OdbcTypeInfo::new(odbc_api::DataType::Varbinary { length: None });
+        let text = crate::OdbcTypeInfo::new(odbc_api::DataType::WVarchar { length: None });
+        let integer = crate::OdbcTypeInfo::new(odbc_api::DataType::Integer);
+
+        assert!(<[u8] as Type<crate::Odbc>>::compatible(&binary));
+        assert!(<[u8] as Type<crate::Odbc>>::compatible(&text));
+        assert!(!<[u8] as Type<crate::Odbc>>::compatible(&integer));
+        assert!(<Vec<u8> as Type<crate::Odbc>>::compatible(&binary));
+        assert!(<Vec<u8> as Type<crate::Odbc>>::compatible(&text));
+        assert!(!<Vec<u8> as Type<crate::Odbc>>::compatible(&integer));
     }
 
     #[test]

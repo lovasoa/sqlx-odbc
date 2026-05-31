@@ -151,4 +151,31 @@ mod tests {
 
         assert!(matches!(error, sqlx_core::Error::ColumnNotFound(name) if name == "missing"));
     }
+
+    #[test]
+    fn try_get_raw_uses_case_insensitive_column_lookup() {
+        use sqlx_core::row::Row;
+
+        let row = create_test_row();
+        let value = row.try_get_raw("mixedcase_col").unwrap();
+
+        assert_eq!(value.as_f64(), Some(std::f64::consts::PI));
+    }
+
+    #[test]
+    fn columns_returns_metadata_in_order() {
+        use sqlx_core::column::Column;
+        use sqlx_core::row::Row;
+
+        let row = create_test_row();
+        let columns = row.columns();
+
+        assert_eq!(columns.len(), 3);
+        assert_eq!(columns[0].ordinal(), 0);
+        assert_eq!(columns[0].name(), "lowercase_col");
+        assert_eq!(columns[1].ordinal(), 1);
+        assert_eq!(columns[1].name(), "UPPERCASE_COL");
+        assert_eq!(columns[2].ordinal(), 2);
+        assert_eq!(columns[2].name(), "MixedCase_Col");
+    }
 }
