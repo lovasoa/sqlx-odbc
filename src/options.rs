@@ -32,6 +32,7 @@ impl Default for OdbcBufferSettings {
 pub struct OdbcConnectOptions {
     pub(crate) conn_str: String,
     pub(crate) buffer_settings: OdbcBufferSettings,
+    pub(crate) statement_cache_capacity: usize,
     pub(crate) log_statements: LevelFilter,
     pub(crate) log_slow_statements: LevelFilter,
     pub(crate) log_slow_statement_duration: Duration,
@@ -76,6 +77,12 @@ impl OdbcConnectOptions {
         self
     }
 
+    /// Sets the maximum number of prepared statements kept in this connection's cache.
+    pub fn statement_cache_capacity(&mut self, capacity: usize) -> &mut Self {
+        self.statement_cache_capacity = capacity;
+        self
+    }
+
     /// Sets regular statement logging level.
     pub fn log_statements(&mut self, level: LevelFilter) -> &mut Self {
         self.log_statements = level;
@@ -102,6 +109,7 @@ impl Debug for OdbcConnectOptions {
         f.debug_struct("OdbcConnectOptions")
             .field("conn_str", &"<redacted>")
             .field("buffer_settings", &self.buffer_settings)
+            .field("statement_cache_capacity", &self.statement_cache_capacity)
             .field("log_statements", &self.log_statements)
             .field("log_slow_statements", &self.log_slow_statements)
             .field(
@@ -131,6 +139,7 @@ impl FromStr for OdbcConnectOptions {
         Ok(Self {
             conn_str,
             buffer_settings: OdbcBufferSettings::default(),
+            statement_cache_capacity: 100,
             log_statements: LevelFilter::Debug,
             log_slow_statements: LevelFilter::Warn,
             log_slow_statement_duration: Duration::from_secs(1),

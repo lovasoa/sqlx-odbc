@@ -1,4 +1,5 @@
 use futures_util::TryStreamExt;
+use sqlx_core::column::Column;
 use sqlx_core::connection::{ConnectOptions, Connection};
 use sqlx_core::executor::Executor;
 use sqlx_core::row::Row;
@@ -6,7 +7,7 @@ use sqlx_core::sql_str::AssertSqlSafe;
 use sqlx_core::statement::Statement;
 use sqlx_core::value::ValueRef;
 use sqlx_core::Either;
-use sqlx_odbc::{OdbcConnectOptions, OdbcConnection};
+use sqlx_odbc::{OdbcConnectOptions, OdbcConnection, OdbcPoolOptions};
 use std::str::FromStr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Once;
@@ -165,6 +166,26 @@ async fn sqlx_connection_connect_ping_and_transaction_when_configured(
 }
 
 #[tokio::test]
+async fn sqlx_pool_acquires_and_queries_when_configured() -> Result<(), Box<dyn std::error::Error>>
+{
+    let Some(url) = database_url("ODBC pool test") else {
+        return Ok(());
+    };
+
+    let pool = OdbcPoolOptions::new()
+        .max_connections(2)
+        .connect(&url)
+        .await?;
+    let row = sqlx_core::query::query("SELECT 1 AS value")
+        .fetch_one(&pool)
+        .await?;
+    assert_eq!(row.try_get::<i32, _>("value")?, 1);
+
+    pool.close().await;
+    Ok(())
+}
+
+#[tokio::test]
 async fn sqlx_query_fetches_basic_row_when_configured() -> Result<(), Box<dyn std::error::Error>> {
     let Some(mut conn) = get_test_conn("ODBC SQLx row fetch test").await? else {
         return Ok(());
@@ -229,6 +250,48 @@ async fn sqlx_runs_independent_connections_in_parallel_when_configured(
 }
 
 #[tokio::test]
+async fn dropping_large_row_stream_keeps_connection_usable_when_configured(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let Some(mut conn) = get_test_conn("ODBC early stream drop test").await? else {
+        return Ok(());
+    };
+
+    let table = test_table_name("early_drop");
+    drop_table_if_exists(&mut conn, &table).await?;
+    let create = format!("CREATE TABLE {table} (id INTEGER)");
+    sqlx_core::query::query(AssertSqlSafe(create))
+        .execute(&mut conn)
+        .await?;
+
+    let insert = format!("INSERT INTO {table} (id) VALUES (?)");
+    for id in 0_i32..128 {
+        sqlx_core::query::query(AssertSqlSafe(insert.as_str()))
+            .bind(id)
+            .execute(&mut conn)
+            .await?;
+    }
+
+    {
+        let select = format!("SELECT id FROM {table} ORDER BY id");
+        let mut rows = sqlx_core::query::query(AssertSqlSafe(select)).fetch(&mut conn);
+        let first = rows
+            .try_next()
+            .await?
+            .expect("large ODBC stream should yield at least one row");
+        assert_eq!(first.try_get::<i32, _>(0)?, 0);
+    }
+
+    let row = sqlx_core::query::query("SELECT 1")
+        .fetch_one(&mut conn)
+        .await?;
+    assert_eq!(row.try_get::<i32, _>(0)?, 1);
+
+    drop_table_if_exists(&mut conn, &table).await?;
+    conn.close().await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn sqlx_fetch_many_ends_rows_with_query_result_when_configured(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let Some(mut conn) = get_test_conn("ODBC SQLx fetch_many result test").await? else {
@@ -249,6 +312,90 @@ async fn sqlx_fetch_many_ends_rows_with_query_result_when_configured(
         panic!("last fetch_many item should be a query result");
     };
     assert_eq!(result.rows_affected(), 0);
+
+    conn.close().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn sqlx_streams_multiple_rows_when_configured() -> Result<(), Box<dyn std::error::Error>> {
+    let Some(mut conn) = get_test_conn("ODBC SQLx multiple rows test").await? else {
+        return Ok(());
+    };
+
+    let rows = sqlx_core::query::query("SELECT 1 AS v UNION ALL SELECT 2 UNION ALL SELECT 3")
+        .fetch_all(&mut conn)
+        .await?;
+    let values = rows
+        .iter()
+        .map(|row| row.try_get::<i32, _>(0))
+        .collect::<Result<Vec<_>, _>>()?;
+
+    assert_eq!(values, vec![1, 2, 3]);
+
+    conn.close().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn sqlx_fetch_optional_returns_none_for_empty_result_when_configured(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let Some(mut conn) = get_test_conn("ODBC SQLx empty result test").await? else {
+        return Ok(());
+    };
+
+    let row = sqlx_core::query::query("SELECT 1 WHERE 1 = 0")
+        .fetch_optional(&mut conn)
+        .await?;
+    assert!(row.is_none());
+
+    conn.close().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn sqlx_streams_multiple_result_sets_when_supported() -> Result<(), Box<dyn std::error::Error>>
+{
+    let Some(mut conn) = get_test_conn("ODBC SQLx multiple result sets test").await? else {
+        return Ok(());
+    };
+
+    if !conn.dbms_name()?.eq_ignore_ascii_case("PostgreSQL") {
+        conn.close().await?;
+        return Ok(());
+    }
+
+    let rows = sqlx_core::query::query("SELECT 1 AS v; SELECT 2 AS v")
+        .fetch_all(&mut conn)
+        .await?;
+    let values = rows
+        .iter()
+        .map(|row| row.try_get::<i32, _>(0))
+        .collect::<Result<Vec<_>, _>>()?;
+
+    assert_eq!(values, vec![1, 2]);
+
+    conn.close().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn sqlx_fetch_optional_skips_empty_result_sets_when_supported(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let Some(mut conn) = get_test_conn("ODBC SQLx empty result-set skip test").await? else {
+        return Ok(());
+    };
+
+    if !conn.dbms_name()?.eq_ignore_ascii_case("PostgreSQL") {
+        conn.close().await?;
+        return Ok(());
+    }
+
+    let row = sqlx_core::query::query("SELECT 1 WHERE 1 = 0; SELECT 2 AS v")
+        .fetch_optional(&mut conn)
+        .await?
+        .expect("second result set should contain one row");
+    assert_eq!(row.try_get::<i32, _>("v")?, 2);
 
     conn.close().await?;
     Ok(())
@@ -446,6 +593,36 @@ async fn sqlx_transactions_commit_and_rollback_data_when_configured(
 }
 
 #[tokio::test]
+async fn dropped_transaction_rolls_back_when_configured() -> Result<(), Box<dyn std::error::Error>>
+{
+    let Some(mut conn) = get_test_conn("ODBC dropped transaction rollback test").await? else {
+        return Ok(());
+    };
+
+    let table = test_table_name("dropped_tx");
+    drop_table_if_exists(&mut conn, &table).await?;
+    let create = format!("CREATE TABLE {table} (id INTEGER NOT NULL)");
+    sqlx_core::query::query(AssertSqlSafe(create))
+        .execute(&mut conn)
+        .await?;
+
+    {
+        let mut tx = conn.begin().await?;
+        let insert = format!("INSERT INTO {table} (id) VALUES (?)");
+        sqlx_core::query::query(AssertSqlSafe(insert))
+            .bind(1_i32)
+            .execute(&mut *tx)
+            .await?;
+    }
+
+    assert_eq!(count_rows(&mut conn, &table).await?, 0);
+
+    drop_table_if_exists(&mut conn, &table).await?;
+    conn.close().await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn sqlx_prepare_reports_basic_metadata_when_configured(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let Some(mut conn) = get_test_conn("ODBC SQLx prepare metadata test").await? else {
@@ -468,6 +645,83 @@ async fn sqlx_prepare_reports_basic_metadata_when_configured(
         .fetch_one(&mut conn)
         .await?;
     assert_eq!(row.try_get::<i32, _>(0)?, 7);
+
+    conn.close().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn sqlx_prepare_then_statement_query_when_configured(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let Some(mut conn) = get_test_conn("ODBC statement query test").await? else {
+        return Ok(());
+    };
+
+    let statement = (&mut conn)
+        .prepare(sqlx_core::sql_str::SqlStr::from_static(
+            "SELECT CAST(? AS INTEGER) AS answer",
+        ))
+        .await?;
+    let row = statement.query().bind(11_i32).fetch_one(&mut conn).await?;
+
+    assert!(
+        row.column(0).name().eq_ignore_ascii_case("answer"),
+        "unexpected ODBC column name: {}",
+        row.column(0).name()
+    );
+    assert_eq!(row.try_get::<i32, _>(0)?, 11);
+
+    conn.close().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn wrong_parameter_count_errors_when_configured() -> Result<(), Box<dyn std::error::Error>> {
+    let Some(mut conn) = get_test_conn("ODBC wrong parameter count test").await? else {
+        return Ok(());
+    };
+
+    let error = sqlx_core::query::query("SELECT ? AS value")
+        .fetch_one(&mut conn)
+        .await
+        .expect_err("query with a missing bind parameter should fail");
+    assert!(
+        matches!(
+            error,
+            sqlx_core::error::Error::Database(_)
+                | sqlx_core::error::Error::Protocol(_)
+                | sqlx_core::error::Error::Encode(_)
+        ),
+        "{error:?} should report a normal parameter-count failure"
+    );
+
+    conn.close().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn statement_cache_is_bounded_and_clearable_when_configured(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let Some(mut conn) = get_test_conn_with("ODBC statement cache test", |options| {
+        options.statement_cache_capacity(1);
+    })
+    .await?
+    else {
+        return Ok(());
+    };
+
+    (&mut conn)
+        .prepare(sqlx_core::sql_str::SqlStr::from_static("SELECT 1"))
+        .await?;
+    assert_eq!(conn.cached_statements_size(), 1);
+
+    (&mut conn)
+        .prepare(sqlx_core::sql_str::SqlStr::from_static("SELECT 2"))
+        .await?;
+    assert_eq!(conn.cached_statements_size(), 1);
+
+    conn.clear_cached_statements().await?;
+    assert_eq!(conn.cached_statements_size(), 0);
 
     conn.close().await?;
     Ok(())
@@ -570,6 +824,79 @@ async fn any_connection_fetches_basic_row_when_configured() -> Result<(), Box<dy
         .fetch_one(&mut conn)
         .await?;
     assert_eq!(row.try_get::<i32, _>(0)?, 1);
+
+    conn.close().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn any_connection_fetches_multiple_rows_when_configured(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let Some(mut conn) = get_any_test_conn("ODBC Any multiple rows test").await? else {
+        return Ok(());
+    };
+
+    let rows = sqlx_core::query::query("SELECT 1 AS value UNION ALL SELECT 2 UNION ALL SELECT 3")
+        .fetch_all(&mut conn)
+        .await?;
+
+    assert_eq!(rows.len(), 3);
+    assert_eq!(rows[0].try_get::<i32, _>("value")?, 1);
+    assert_eq!(rows[1].try_get::<i32, _>("value")?, 2);
+    assert_eq!(rows[2].try_get::<i32, _>("value")?, 3);
+
+    conn.close().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn any_fetch_optional_returns_some_and_none_when_configured(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let Some(mut conn) = get_any_test_conn("ODBC Any optional row test").await? else {
+        return Ok(());
+    };
+
+    let some = sqlx_core::query::query("SELECT 1 AS value")
+        .fetch_optional(&mut conn)
+        .await?;
+    assert_eq!(
+        some.expect("first Any query should return a row")
+            .try_get::<i32, _>("value")?,
+        1
+    );
+
+    let none = sqlx_core::query::query("SELECT 1 AS value WHERE 1 = 0")
+        .fetch_optional(&mut conn)
+        .await?;
+    assert!(none.is_none());
+
+    conn.close().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn any_connection_recovers_after_query_error_when_configured(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let Some(mut conn) = get_any_test_conn("ODBC Any error recovery test").await? else {
+        return Ok(());
+    };
+
+    let error = match sqlx_core::query::query("SELECT * FROM sqlx_missing_fs")
+        .fetch_optional(&mut conn)
+        .await
+    {
+        Ok(_) => panic!("fetching from a missing table through Any should fail"),
+        Err(error) => error,
+    };
+    assert!(
+        matches!(error, sqlx_core::error::Error::Database(_)),
+        "{error:?} should be a database error"
+    );
+
+    let row = sqlx_core::query::query("SELECT 1 AS value")
+        .fetch_one(&mut conn)
+        .await?;
+    assert_eq!(row.try_get::<i32, _>("value")?, 1);
 
     conn.close().await?;
     Ok(())

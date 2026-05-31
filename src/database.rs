@@ -23,3 +23,5 @@ impl sqlx_core::database::Database for Odbc {
     const NAME: &'static str = "ODBC";
     const URL_SCHEMES: &'static [&'static str] = &["odbc"];
 }
+
+impl sqlx_core::database::HasStatementCache for Odbc {}

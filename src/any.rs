@@ -1,8 +1,8 @@
 //! Runtime `Any` driver support for ODBC.
 
 use crate::{
-    connection::OdbcExecution, DataTypeExt, Odbc, OdbcArgumentValue, OdbcArguments, OdbcColumn,
-    OdbcConnectOptions, OdbcConnection, OdbcQueryResult, OdbcTransactionManager, OdbcTypeInfo,
+    DataTypeExt, Odbc, OdbcArgumentValue, OdbcArguments, OdbcColumn, OdbcConnectOptions,
+    OdbcConnection, OdbcQueryResult, OdbcTransactionManager, OdbcTypeInfo,
 };
 use futures_core::future::BoxFuture;
 use futures_core::stream::BoxStream;
@@ -78,63 +78,50 @@ impl AnyConnectionBackend for OdbcConnection {
     fn fetch_many(
         &mut self,
         query: SqlStr,
-        _persistent: bool,
+        persistent: bool,
         arguments: Option<AnyArguments>,
     ) -> BoxStream<'_, sqlx_core::Result<Either<AnyQueryResult, AnyRow>>> {
-        let arguments = arguments.map(map_arguments).transpose();
+        let arguments = match arguments.map(map_arguments).transpose() {
+            Ok(arguments) => arguments,
+            Err(error) => return stream::once(future::ready(Err(error))).boxed(),
+        };
+        let rx = self.execute_receiver(query, persistent, arguments);
 
-        stream::once(async move {
-            let arguments = arguments?;
-            self.run_blocking_sql(query.as_str(), arguments.as_ref())
+        stream::unfold(rx, |rx| async move {
+            let item = rx.recv_async().await.ok()?;
+            Some((item, rx))
         })
-        .map(|result| match result {
-            Ok(OdbcExecution::Done(result)) => {
-                stream::once(future::ready(Ok(Either::Left(map_result(result))))).boxed()
+        .map(|item| match item? {
+            Either::Left(result) => Ok(Either::Left(map_result(result))),
+            Either::Right(row) => {
+                let column_names = column_names(row.columns());
+                AnyRow::map_from(&row, column_names).map(Either::Right)
             }
-            Ok(OdbcExecution::Rows(rows)) => {
-                if rows.is_empty() {
-                    stream::once(future::ready(Ok(Either::Left(map_result(
-                        OdbcQueryResult::new(0),
-                    )))))
-                    .boxed()
-                } else {
-                    let column_names =
-                        column_names(rows.first().expect("rows is not empty").columns());
-                    let rows = rows.into_iter().map(move |row| {
-                        AnyRow::map_from(&row, Arc::clone(&column_names)).map(Either::Right)
-                    });
-                    let done =
-                        std::iter::once(Ok(Either::Left(map_result(OdbcQueryResult::new(0)))));
-                    stream::iter(rows.chain(done)).boxed()
-                }
-            }
-            Err(error) => stream::once(future::ready(Err(error))).boxed(),
         })
-        .flatten()
         .boxed()
     }
 
     fn fetch_optional(
         &mut self,
         query: SqlStr,
-        _persistent: bool,
+        persistent: bool,
         arguments: Option<AnyArguments>,
     ) -> BoxFuture<'_, sqlx_core::Result<Option<AnyRow>>> {
         let arguments = arguments.map(map_arguments).transpose();
 
         Box::pin(async move {
             let arguments = arguments?;
-            match self.run_blocking_sql(query.as_str(), arguments.as_ref())? {
-                OdbcExecution::Done(_) => Ok(None),
-                OdbcExecution::Rows(rows) => rows
-                    .into_iter()
-                    .next()
-                    .map(|row| {
+            let rx = self.execute_receiver(query, persistent, arguments);
+            while let Ok(item) = rx.recv_async().await {
+                match item? {
+                    Either::Left(_) => {}
+                    Either::Right(row) => {
                         let column_names = column_names(row.columns());
-                        AnyRow::map_from(&row, column_names)
-                    })
-                    .transpose(),
+                        return AnyRow::map_from(&row, column_names).map(Some);
+                    }
+                }
             }
+            Ok(None)
         })
     }
 

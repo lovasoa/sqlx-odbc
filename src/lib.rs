@@ -122,3 +122,5 @@ pub type OdbcTransaction<'c> = sqlx_core::transaction::Transaction<'c, Odbc>;
 /// An alias for [`Executor<'_, Database = Odbc>`][sqlx_core::executor::Executor].
 pub trait OdbcExecutor<'c>: sqlx_core::executor::Executor<'c, Database = Odbc> {}
 impl<'c, T> OdbcExecutor<'c> for T where T: sqlx_core::executor::Executor<'c, Database = Odbc> {}
+
+sqlx_core::impl_acquire!(Odbc, OdbcConnection);

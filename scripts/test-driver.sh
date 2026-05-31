@@ -59,7 +59,15 @@ case "$driver" in
             fi
         done
 
-        set -- "${cargo_args[@]}" -- "${harness_args[@]}" "${DUCKDB_SKIP_ARGS[@]}"
+        if [[ "${#cargo_args[@]}" -eq 0 && "${#harness_args[@]}" -eq 0 ]]; then
+            set -- -- "${DUCKDB_SKIP_ARGS[@]}"
+        elif [[ "${#cargo_args[@]}" -eq 0 ]]; then
+            set -- -- "${harness_args[@]}" "${DUCKDB_SKIP_ARGS[@]}"
+        elif [[ "${#harness_args[@]}" -eq 0 ]]; then
+            set -- "${cargo_args[@]}" -- "${DUCKDB_SKIP_ARGS[@]}"
+        else
+            set -- "${cargo_args[@]}" -- "${harness_args[@]}" "${DUCKDB_SKIP_ARGS[@]}"
+        fi
         ;;
     postgres)
         postgres_driver="${POSTGRES_ODBC_DRIVER:-PostgreSQL Unicode}"
@@ -80,4 +88,4 @@ case "$driver" in
 esac
 
 echo "running sqlx-odbc integration tests with driver: ${driver}"
-ODBC_TEST_REQUIRED=1 cargo test --test odbc "$@"
+ODBC_TEST_REQUIRED=1 cargo test --features runtime-tokio --test odbc "$@"
