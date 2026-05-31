@@ -1,6 +1,6 @@
 [package]
 name = "sqlx-odbc"
-version = "0.0.1"
+version = "0.0.2"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/lovasoa/sqlx-odbc"
@@ -12,11 +12,13 @@ rust-version = "1.94"
 
 [features]
 default = []
+chrono = ["dep:chrono"]
 runtime-tokio = []
 tls-none = []
 vendored-unix-odbc = ["odbc-api/vendored-unix-odbc"]
 
 [dependencies]
+chrono = { version = "0.4.34", default-features = false, features = ["std", "clock"], optional = true }
 futures-core = { version = "0.3.32", default-features = false }
 futures-util = { version = "0.3.32", default-features = false, features = ["alloc"] }
 log = "0.4.28"
