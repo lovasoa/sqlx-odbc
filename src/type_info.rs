@@ -51,6 +51,26 @@ impl OdbcTypeInfo {
     /// `TIMESTAMP` type information with zero fractional precision.
     pub const TIMESTAMP: Self = Self::new(DataType::Timestamp { precision: 0 });
 
+    /// Creates `CHAR` type information.
+    pub const fn char(length: Option<std::num::NonZeroUsize>) -> Self {
+        Self::new(DataType::Char { length })
+    }
+
+    /// Creates `FLOAT` type information.
+    pub const fn float(precision: usize) -> Self {
+        Self::new(DataType::Float { precision })
+    }
+
+    /// Creates `TIME` type information.
+    pub const fn time(precision: i16) -> Self {
+        Self::new(DataType::Time { precision })
+    }
+
+    /// Creates `TIMESTAMP` type information.
+    pub const fn timestamp(precision: i16) -> Self {
+        Self::new(DataType::Timestamp { precision })
+    }
+
     /// Creates `VARCHAR` type information.
     pub const fn varchar(length: Option<std::num::NonZeroUsize>) -> Self {
         Self::new(DataType::Varchar { length })
@@ -120,6 +140,9 @@ pub trait DataTypeExt {
 
     /// Returns whether this type carries numeric data.
     fn accepts_numeric_data(self) -> bool;
+
+    /// Returns whether this type carries date or time data.
+    fn accepts_datetime_data(self) -> bool;
 }
 
 impl DataTypeExt for DataType {
@@ -183,6 +206,13 @@ impl DataTypeExt for DataType {
                 | DataType::Double
                 | DataType::Decimal { .. }
                 | DataType::Numeric { .. }
+        )
+    }
+
+    fn accepts_datetime_data(self) -> bool {
+        matches!(
+            self,
+            DataType::Date | DataType::Time { .. } | DataType::Timestamp { .. }
         )
     }
 }
