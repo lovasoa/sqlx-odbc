@@ -22,6 +22,8 @@ prefixed for legacy compatibility.
 Driver scripts set `ODBC_TEST_REQUIRED=1`, so they fail instead of skipping if
 they cannot produce a connection URL.
 
+Inside `nix develop`, the DuckDB and PostgreSQL drivers are already registered. Use `with-postgres scripts/test-driver.sh postgres` to run against a throwaway PostgreSQL server.
+
 Run the same integration tests locally against one known driver:
 
 ```sh

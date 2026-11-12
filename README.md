@@ -115,6 +115,17 @@ string values that driver requires. Vendored unixODBC is LGPL-2.1-or-later, so
 review the licensing implications before distributing statically linked
 artifacts.
 
-For local development, run fast checks with `./scripts/ci.sh`. Run e2e tests
-against one installed driver with `./scripts/test-driver.sh duckdb` or
-`ODBC_DATABASE_URL=... ./scripts/test-driver.sh custom`.
+## Development
+
+The Nix dev shell provides the Rust toolchain, unixODBC, PostgreSQL 17, the PostgreSQL ODBC driver, and DuckDB ODBC 1.5.5.0, the release SQLPage ships. It registers both drivers under the names `scripts/test-driver.sh` expects, so nothing needs to be installed on your system.
+
+```sh
+nix develop
+./scripts/ci.sh
+./scripts/test-driver.sh duckdb
+with-postgres ./scripts/test-driver.sh postgres
+```
+
+`with-postgres` starts a throwaway PostgreSQL server on a private socket, runs the command you give it, then deletes the server.
+
+Without Nix, install unixODBC and a driver yourself as described in [ODBC Setup](#odbc-setup), then run the same scripts.
