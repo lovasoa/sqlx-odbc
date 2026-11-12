@@ -117,7 +117,7 @@ artifacts.
 
 ## Development
 
-The Nix dev shell provides the Rust toolchain, unixODBC, PostgreSQL 17, the PostgreSQL ODBC driver, and DuckDB ODBC 1.5.5.0, the release SQLPage ships. It registers both drivers under the names `scripts/test-driver.sh` expects, so nothing needs to be installed on your system.
+The Nix dev shell provides the Rust toolchain, unixODBC, PostgreSQL 17, the PostgreSQL ODBC driver, and DuckDB ODBC 1.5.5.0, the release SQLPage ships. It registers both drivers under the names `scripts/test-driver.sh` expects, so nothing needs to be installed on your system. CI runs every job in this same shell.
 
 ```sh
 nix develop

@@ -20,17 +20,18 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy, rustfmt
+      - uses: cachix/install-nix-action@v31
 
       - uses: Swatinem/rust-cache@v2
 
-      - name: Install ODBC headers
-        run: sudo apt-get update && sudo apt-get install -y unixodbc-dev
+      - name: Check the flake
+        run: nix flake check
+
+      - name: Check Nix formatting
+        run: nix fmt -- --ci
 
       - name: Run static checks
-        run: scripts/ci.sh
+        run: nix develop --command scripts/ci.sh
 
   odbc-drivers:
     name: ODBC driver / ${{ matrix.driver }}
@@ -39,52 +40,23 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        driver:
-          - duckdb
-          - postgres
-
-    services:
-      postgres:
-        image: postgres:17
-        env:
-          POSTGRES_PASSWORD: postgres
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd pg_isready
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 20
-
-    env:
-      DUCKDB_ODBC_VERSION: v1.5.3.0
+        include:
+          - driver: duckdb
+            command: scripts/test-driver.sh duckdb
+          - driver: postgres
+            command: with-postgres scripts/test-driver.sh postgres
 
     steps:
       - uses: actions/checkout@v5
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: cachix/install-nix-action@v31
 
       - uses: Swatinem/rust-cache@v2
         with:
           key: odbc-${{ matrix.driver }}
 
-      - name: Install ODBC runtime
-        run: sudo apt-get update && sudo apt-get install -y curl odbc-postgresql unixodbc-dev unzip
-
-      - name: Install DuckDB ODBC driver
-        if: matrix.driver == 'duckdb'
-        run: |
-          curl -L \
-            --fail \
-            --output "$RUNNER_TEMP/duckdb_odbc.zip" \
-            "https://github.com/duckdb/duckdb-odbc/releases/download/${DUCKDB_ODBC_VERSION}/duckdb_odbc-linux-amd64.zip"
-          unzip -q "$RUNNER_TEMP/duckdb_odbc.zip" -d "$RUNNER_TEMP/duckdb_odbc"
-          duckdb_driver="$(find "$RUNNER_TEMP/duckdb_odbc" -type f -name libduckdb_odbc.so -print -quit)"
-          test -n "$duckdb_driver"
-          echo "DUCKDB_ODBC_DRIVER=$duckdb_driver" >> "$GITHUB_ENV"
-
       - name: Run ODBC integration tests
-        run: scripts/test-driver.sh "${{ matrix.driver }}"
+        run: nix develop --command ${{ matrix.command }}
 
   publish:
     name: Publish
@@ -97,14 +69,11 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: cachix/install-nix-action@v31
 
       - uses: Swatinem/rust-cache@v2
-
-      - name: Install ODBC headers
-        run: sudo apt-get update && sudo apt-get install -y unixodbc-dev
 
       - name: Publish to crates.io
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-        run: scripts/publish.sh
+        run: nix develop --command scripts/publish.sh
