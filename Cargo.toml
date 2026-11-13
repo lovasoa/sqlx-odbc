@@ -9,7 +9,7 @@ readme = "README.md"
 keywords = ["sqlx", "odbc", "database"]
 categories = ["database"]
 rust-version = "1.94"
-exclude = ["/flake.nix", "/flake.lock", "/nix"]
+exclude = ["/flake.nix", "/flake.lock", "/nix", "/repro"]
 
 [features]
 default = []

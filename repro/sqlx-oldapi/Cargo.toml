@@ -1,0 +1,13 @@
+[package]
+name = "sqlx-repro"
+version = "0.0.0"
+edition = "2024"
+publish = false
+description = "The sqlx-oldapi 0.6.59 side of a reproduction. `repro/sqlx-odbc` exports the same names for sqlx-odbc."
+
+# The type features match what SQLPage enables, because they change how `Any` decodes values.
+# https://github.com/sqlpage/SQLPage/blob/41dd9db2f66b9cd9909b60a3443cfd4d939e24db/Cargo.toml#L40-L53
+[dependencies.sqlx-core-oldapi]
+version = "=0.6.59"
+default-features = false
+features = ["any", "odbc", "runtime-tokio-rustls", "chrono", "bigdecimal", "json", "uuid"]

@@ -129,3 +129,15 @@ with-postgres ./scripts/test-driver.sh postgres
 `with-postgres` starts a throwaway PostgreSQL server on a private socket, runs the command you give it, then deletes the server.
 
 Without Nix, install unixODBC and a driver yourself as described in [ODBC Setup](#odbc-setup), then run the same scripts.
+
+## Reproducing behavior differences
+
+A reproduction is one sqlx program in a single Rust file, posted as a comment. Pasting the comment into a terminal prints the file, runs it against sqlx-oldapi 0.6.59, then runs the same file against sqlx-odbc, each on DuckDB and PostgreSQL. Reproductions are not committed; tests in `tests/` guard the behavior once it is understood.
+
+```sh
+nix run github:lovasoa/sqlx-odbc#repro <<'EOF'
+…the reproduction…
+EOF
+```
+
+See [`repro/README.md`](repro/README.md) to write one and post it.

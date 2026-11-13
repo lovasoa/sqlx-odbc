@@ -1,10 +1,20 @@
 {
   description = "ODBC driver for SQLx";
 
-  inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+  inputs = {
+    nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+    rust-overlay = {
+      url = "github:oxalica/rust-overlay";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
+  };
 
   outputs =
-    { self, nixpkgs }:
+    {
+      self,
+      nixpkgs,
+      rust-overlay,
+    }:
     let
       systems = [
         "x86_64-linux"
@@ -29,6 +39,28 @@
         postgresql = pkgs.postgresql_17;
 
         with-postgres = pkgs.callPackage ./nix/with-postgres.nix { inherit postgresql; };
+
+        cargo-nightly = (rust-overlay.lib.mkRustBin { } pkgs).nightly."2026-11-11".minimal;
+
+        repro = pkgs.callPackage ./nix/repro.nix {
+          inherit
+            cargo-nightly
+            duckdb-odbc
+            odbcinst
+            postgresql
+            postgresql-odbc
+            with-postgres
+            ;
+          revision = self.rev or self.dirtyRev or null;
+        };
+      });
+
+      apps = forEachSystem (pkgs: {
+        repro = {
+          type = "app";
+          program = nixpkgs.lib.getExe self.packages.${pkgs.stdenv.hostPlatform.system}.repro;
+          meta.description = "Run reproduction scripts against sqlx-oldapi and sqlx-odbc";
+        };
       });
 
       devShells = forEachSystem (
