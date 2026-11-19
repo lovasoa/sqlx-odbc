@@ -46,6 +46,13 @@ Override the pieces with `POSTGRES_ODBC_DRIVER`, `POSTGRES_HOST`,
 The Rust tests intentionally read only `ODBC_DATABASE_URL`. CI covers multiple actual drivers with
 a job matrix that invokes `scripts/test-driver.sh` once per driver.
 
+CI also runs optional type round trips on both drivers. To enable these tests locally, pass
+the matching Cargo features to the driver script:
+
+```sh
+scripts/test-driver.sh duckdb --features bigdecimal,chrono,json,rust_decimal,time,uuid
+```
+
 Native requirements:
 
 - Unix-like systems need the `unixODBC` driver manager unless the

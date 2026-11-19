@@ -12,6 +12,17 @@ use std::str::FromStr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Once;
 
+#[cfg(any(
+    feature = "bigdecimal",
+    feature = "chrono",
+    feature = "json",
+    feature = "rust_decimal",
+    feature = "time",
+    feature = "uuid"
+))]
+#[path = "odbc/optional_types.rs"]
+mod optional_types;
+
 static ANY_DRIVERS: &[sqlx_core::any::driver::AnyDriver] = &[sqlx_odbc::any::DRIVER];
 static TABLE_ID: AtomicU64 = AtomicU64::new(0);
 const MISSING_TABLE_READ: &str = "SELECT contents FROM sqlx_missing_fs WHERE path = ?";
