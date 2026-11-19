@@ -1026,27 +1026,22 @@ fn fetch_value(
                 .map(|value| OdbcValueKind::Bit(value.as_bool()))
                 .unwrap_or(OdbcValueKind::Null)
         }
-        DataType::TinyInt => fetch_nullable(
-            row,
-            column_number,
-            column,
-            data_type,
-            OdbcValueKind::TinyInt,
-        )?,
-        DataType::SmallInt => fetch_nullable(
-            row,
-            column_number,
-            column,
-            data_type,
-            OdbcValueKind::SmallInt,
-        )?,
-        DataType::Integer => fetch_nullable(
-            row,
-            column_number,
-            column,
-            data_type,
-            OdbcValueKind::Integer,
-        )?,
+        // ODBC uses the same SQL type codes for signed and unsigned columns.
+        DataType::TinyInt => {
+            fetch_nullable(row, column_number, column, data_type, |value: i16| {
+                i8::try_from(value).map_or(OdbcValueKind::SmallInt(value), OdbcValueKind::TinyInt)
+            })?
+        }
+        DataType::SmallInt => {
+            fetch_nullable(row, column_number, column, data_type, |value: i32| {
+                i16::try_from(value).map_or(OdbcValueKind::Integer(value), OdbcValueKind::SmallInt)
+            })?
+        }
+        DataType::Integer => {
+            fetch_nullable(row, column_number, column, data_type, |value: i64| {
+                i32::try_from(value).map_or(OdbcValueKind::BigInt(value), OdbcValueKind::Integer)
+            })?
+        }
         DataType::BigInt => {
             fetch_nullable(row, column_number, column, data_type, OdbcValueKind::BigInt)?
         }
