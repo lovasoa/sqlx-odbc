@@ -897,6 +897,27 @@ async fn any_fetch_optional_returns_some_and_none_when_configured(
 }
 
 #[tokio::test]
+async fn any_connection_reports_and_clears_cached_statements_when_configured(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let Some(mut conn) = get_any_test_conn("Any ODBC statement cache test").await? else {
+        return Ok(());
+    };
+
+    assert_eq!(conn.cached_statements_size(), 0);
+    for value in [1_i32, 2] {
+        let row = sqlx_core::query::query("SELECT CAST(? AS INTEGER)")
+            .bind(value)
+            .fetch_one(&mut conn)
+            .await?;
+        assert_eq!(row.try_get::<i32, _>(0)?, value);
+        assert_eq!(conn.cached_statements_size(), 1);
+    }
+    conn.clear_cached_statements().await?;
+    assert_eq!(conn.cached_statements_size(), 0);
+    Ok(())
+}
+
+#[tokio::test]
 async fn any_connection_recovers_after_query_error_when_configured(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let Some(mut conn) = get_any_test_conn("ODBC Any error recovery test").await? else {

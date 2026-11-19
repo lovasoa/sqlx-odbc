@@ -63,6 +63,14 @@ impl AnyConnectionBackend for OdbcConnection {
         OdbcTransactionManager::get_transaction_depth(self)
     }
 
+    fn cached_statements_size(&self) -> usize {
+        Connection::cached_statements_size(self)
+    }
+
+    fn clear_cached_statements(&mut self) -> BoxFuture<'_, sqlx_core::Result<()>> {
+        Connection::clear_cached_statements(self).boxed()
+    }
+
     fn shrink_buffers(&mut self) {
         Connection::shrink_buffers(self);
     }
