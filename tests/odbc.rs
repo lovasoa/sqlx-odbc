@@ -449,6 +449,29 @@ async fn sqlx_query_decodes_decimal_integer_when_configured(
 }
 
 #[tokio::test]
+async fn sqlx_query_decodes_full_u64_range_from_decimal_when_configured(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let Some(mut conn) = get_test_conn("ODBC unsigned decimal decode test").await? else {
+        return Ok(());
+    };
+    let row = sqlx_core::query::query(
+        "SELECT CAST(18446744073709551615 AS DECIMAL(20, 0)), \
+                CAST(18446744073709551616 AS DECIMAL(20, 0)), CAST(-1 AS DECIMAL(20, 0)), \
+                CAST(3.5 AS DECIMAL(20, 1))",
+    )
+    .fetch_one(&mut conn)
+    .await?;
+    assert_eq!(row.try_get::<u64, _>(0)?, u64::MAX);
+    for index in 1..=3 {
+        assert!(matches!(
+            row.try_get::<u64, _>(index),
+            Err(sqlx_core::Error::ColumnDecode { .. })
+        ));
+    }
+    Ok(())
+}
+
+#[tokio::test]
 async fn sqlx_query_decodes_decimal_integer_in_buffered_mode_when_configured(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let Some(mut conn) = get_test_conn_with("ODBC SQLx buffered decimal decode test", |options| {
