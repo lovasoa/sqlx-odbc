@@ -380,6 +380,45 @@ async fn sqlx_streams_multiple_result_sets_when_supported() -> Result<(), Box<dy
 }
 
 #[tokio::test]
+async fn sqlx_streams_update_counts_and_rows_in_order_when_supported(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let Some(mut conn) = get_test_conn("ODBC mixed result sets test").await? else {
+        return Ok(());
+    };
+    if !conn.dbms_name()?.eq_ignore_ascii_case("PostgreSQL") {
+        return Ok(());
+    }
+
+    let create = "CREATE TEMPORARY TABLE mixed_results (id INTEGER)";
+    sqlx_core::raw_sql::raw_sql(create)
+        .execute(&mut conn)
+        .await?;
+    let batch = "INSERT INTO mixed_results VALUES (1), (2); SELECT 3 AS value; \
+                 UPDATE mixed_results SET id = 4 WHERE id = 1; SELECT 5 AS value";
+    let results = sqlx_core::raw_sql::raw_sql(batch)
+        .fetch_many(&mut conn)
+        .map_ok(|item| match item {
+            Either::Left(result) => Either::Left(result.rows_affected()),
+            Either::Right(row) => Either::Right(row.get::<i32, _>(0)),
+        })
+        .try_collect::<Vec<_>>()
+        .await?;
+    assert_eq!(
+        results,
+        [
+            Either::Left(2),
+            Either::Right(3),
+            Either::Left(0),
+            Either::Left(1),
+            Either::Right(5),
+            Either::Left(0),
+        ]
+    );
+    conn.close().await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn sqlx_fetch_optional_skips_empty_result_sets_when_supported(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let Some(mut conn) = get_test_conn("ODBC SQLx empty result-set skip test").await? else {

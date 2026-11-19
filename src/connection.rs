@@ -6,7 +6,8 @@ use futures_core::future::BoxFuture;
 use futures_core::stream::BoxStream;
 use futures_util::{future, stream, StreamExt};
 use odbc_api::buffers::{AnyColumnBufferSlice, BufferDesc, ColumnarDynBuffer, NullableSlice};
-use odbc_api::{ConnectionTransitions, Cursor, DataType, Nullable, ResultSetMetadata};
+use odbc_api::handles::{AsStatementRef, Statement as _, StatementRef};
+use odbc_api::{ConnectionTransitions, Cursor, CursorImpl, DataType, Nullable, ResultSetMetadata};
 use sqlx_core::column::Column;
 use sqlx_core::common::StatementCache;
 use sqlx_core::executor::{Execute, Executor};
@@ -493,19 +494,9 @@ fn execute_sql_to_channel(
                     )
                 })
             })? {
-                stream_result_sets(cursor, buffer_settings, tx)?;
-                return Ok(());
+                return stream_result_sets(cursor.into_stmt(), buffer_settings, tx);
             }
-
-            let rows_affected = prepared.row_count().map_err(|error| {
-                crate::error::database_error_with_context_lazy(error, || {
-                    format!(
-                        "failed to read ODBC row count for prepared statement: `{}`",
-                        sql_preview(sql.as_str())
-                    )
-                })
-            })?;
-            send_rows_affected(rows_affected, tx)
+            stream_result_sets(prepared.as_stmt_ref(), buffer_settings, tx)
         }
         MaybePrepared::NotPrepared(conn) => {
             let mut statement = conn.into_preallocated().map_err(|error| {
@@ -528,33 +519,11 @@ fn execute_sql_to_channel(
                     })
                 })?
             {
-                stream_result_sets(cursor, buffer_settings, tx)?;
-                return Ok(());
+                return stream_result_sets(cursor.into_stmt(), buffer_settings, tx);
             }
-
-            let rows_affected = statement.row_count().map_err(|error| {
-                crate::error::database_error_with_context_lazy(error, || {
-                    format!(
-                        "failed to read ODBC row count for query: `{}`",
-                        sql_preview(sql.as_str())
-                    )
-                })
-            })?;
-            send_rows_affected(rows_affected, tx)
+            stream_result_sets(statement.as_stmt_ref(), buffer_settings, tx)
         }
     }
-}
-
-fn send_rows_affected(
-    rows_affected: Option<usize>,
-    tx: &ExecuteSender,
-) -> std::result::Result<(), sqlx_core::Error> {
-    let rows_affected = rows_affected
-        .unwrap_or(0)
-        .try_into()
-        .map_err(|_| sqlx_core::Error::Protocol("ODBC row count does not fit in u64".to_owned()))?;
-    send_done(tx, rows_affected);
-    Ok(())
 }
 
 fn send_done(tx: &ExecuteSender, rows_affected: u64) -> bool {
@@ -672,39 +641,57 @@ fn validate_parameter_metadata(
     Ok(())
 }
 
-fn stream_result_sets<C>(
-    mut cursor: C,
+fn stream_result_sets(
+    mut stmt: StatementRef<'_>,
     settings: OdbcBufferSettings,
     tx: &ExecuteSender,
-) -> std::result::Result<(), sqlx_core::Error>
-where
-    C: Cursor + ResultSetMetadata,
-{
+) -> std::result::Result<(), sqlx_core::Error> {
     loop {
-        if cursor.num_result_cols().map_err(|error| {
+        let columns = stmt.num_result_cols().into_result(&stmt).map_err(|error| {
             crate::error::database_error_with_context(
                 error,
                 "failed to read ODBC result-column count",
             )
-        })? == 0
-        {
-            send_done(tx, 0);
-        } else if let Some(max_column_size) = settings.max_column_size {
-            let (receiver_open, finished_cursor) =
-                stream_rows_buffered(cursor, settings.batch_size, max_column_size, tx)?;
-            if !receiver_open {
+        })?;
+        if columns < 0 {
+            return Err(sqlx_core::Error::Protocol(format!(
+                "ODBC returned a negative column count: {columns}"
+            )));
+        }
+        if columns == 0 {
+            let count = stmt.row_count().into_result(&stmt).map_err(|error| {
+                crate::error::database_error_with_context(error, "failed to read ODBC row count")
+            })?;
+            if !send_done(tx, u64::try_from(count).unwrap_or(0)) {
                 return Ok(());
             }
-            cursor = finished_cursor;
-        } else if !stream_rows_unbuffered(&mut cursor, tx)? {
-            return Ok(());
+        } else {
+            // SQLNumResultCols reported a row set after successful execution or SQLMoreResults.
+            let mut cursor = unsafe { CursorImpl::new(stmt) };
+            if let Some(max_column_size) = settings.max_column_size {
+                let (receiver_open, finished_cursor) =
+                    stream_rows_buffered(cursor, settings.batch_size, max_column_size, tx)?;
+                if !receiver_open {
+                    return Ok(());
+                }
+                cursor = finished_cursor;
+            } else if !stream_rows_unbuffered(&mut cursor, tx)? {
+                return Ok(());
+            }
+            stmt = cursor.into_stmt();
         }
 
-        match cursor.more_results().map_err(|error| {
-            crate::error::database_error_with_context(error, "failed to advance ODBC result set")
-        })? {
-            Some(next_cursor) => cursor = next_cursor,
-            None => return Ok(()),
+        // Buffered fetching has unbound its columns. Unbuffered fetching leaves no column bindings.
+        let more_results = unsafe { stmt.more_results() }
+            .into_result_bool(&stmt)
+            .map_err(|error| {
+                crate::error::database_error_with_context(
+                    error,
+                    "failed to advance ODBC result set",
+                )
+            })?;
+        if !more_results {
+            return Ok(());
         }
     }
 }
