@@ -181,7 +181,24 @@ impl_decode_integer!(i64);
 impl_decode_integer!(u8);
 impl_decode_integer!(u16);
 impl_decode_integer!(u32);
-impl_decode_integer!(u64);
+impl<'r> sqlx_core::decode::Decode<'r, crate::Odbc> for u64 {
+    fn decode(value: OdbcValueRef<'r>) -> Result<Self, sqlx_core::error::BoxDynError> {
+        let integer = match value.as_str() {
+            Some(text) => parse_integer_text(text),
+            None => value
+                .as_i64()
+                .and_then(|integer| u64::try_from(integer).ok()),
+        };
+        integer.ok_or_else(|| {
+            decode_error(
+                value,
+                "u64",
+                "source value is outside the unsigned integer range or is not an integer",
+            )
+            .into()
+        })
+    }
+}
 
 impl<'r> sqlx_core::decode::Decode<'r, crate::Odbc> for bool {
     fn decode(value: OdbcValueRef<'r>) -> Result<Self, sqlx_core::error::BoxDynError> {
@@ -302,7 +319,7 @@ fn parse_bool_text(value: &str) -> Option<bool> {
     }
 }
 
-fn parse_integer_text(value: &str) -> Option<i64> {
+fn parse_integer_text<T: std::str::FromStr>(value: &str) -> Option<T> {
     let value = value.trim();
 
     if let Ok(value) = value.parse() {
