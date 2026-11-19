@@ -452,6 +452,15 @@ mod tests {
     }
 
     #[test]
+    fn sql_bit_is_compatible_with_bool() {
+        use sqlx_core::value::Value;
+
+        assert!(OdbcValue::new(OdbcValueKind::Bit(true))
+            .try_decode::<bool>()
+            .unwrap());
+    }
+
+    #[test]
     fn borrowed_values_decode_bool_variants() {
         use sqlx_core::decode::Decode;
         use sqlx_core::value::Value;

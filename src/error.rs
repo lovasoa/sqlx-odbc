@@ -155,10 +155,10 @@ impl sqlx_core::error::DatabaseError for OdbcDatabaseError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use odbc_api::handles::{Record, SqlChar, State};
+    use odbc_api::handles::{Record, State};
 
-    fn sql_chars(text: &str) -> Vec<SqlChar> {
-        text.bytes().collect()
+    fn sql_chars<C: From<u8>>(text: &str) -> Vec<C> {
+        text.bytes().map(C::from).collect()
     }
 
     #[test]

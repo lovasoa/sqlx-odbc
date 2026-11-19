@@ -98,32 +98,7 @@ impl sqlx_core::type_info::TypeInfo for OdbcTypeInfo {
     }
 
     fn name(&self) -> &str {
-        match self.data_type {
-            DataType::BigInt => "BIGINT",
-            DataType::Binary { .. } => "BINARY",
-            DataType::Bit => "BIT",
-            DataType::Char { .. } => "CHAR",
-            DataType::Date => "DATE",
-            DataType::Decimal { .. } => "DECIMAL",
-            DataType::Double => "DOUBLE",
-            DataType::Float { .. } => "FLOAT",
-            DataType::Integer => "INTEGER",
-            DataType::LongVarbinary { .. } => "LONGVARBINARY",
-            DataType::LongVarchar { .. } => "LONGVARCHAR",
-            DataType::Numeric { .. } => "NUMERIC",
-            DataType::Real => "REAL",
-            DataType::SmallInt => "SMALLINT",
-            DataType::Time { .. } => "TIME",
-            DataType::Timestamp { .. } => "TIMESTAMP",
-            DataType::TinyInt => "TINYINT",
-            DataType::Varbinary { .. } => "VARBINARY",
-            DataType::Varchar { .. } => "VARCHAR",
-            DataType::WChar { .. } => "WCHAR",
-            DataType::WLongVarchar { .. } => "WLONGVARCHAR",
-            DataType::WVarchar { .. } => "WVARCHAR",
-            DataType::Unknown => "UNKNOWN",
-            DataType::Other { .. } => "OTHER",
-        }
+        self.data_type.name()
     }
 }
 

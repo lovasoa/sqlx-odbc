@@ -1,7 +1,7 @@
 use crate::{Odbc, OdbcColumn, OdbcValue};
 use std::sync::Arc;
 
-/// Minimal ODBC row container used by the SQLx-core skeleton.
+/// A row returned by an ODBC query.
 #[derive(Debug, Clone, Default)]
 pub struct OdbcRow {
     columns: Arc<[OdbcColumn]>,

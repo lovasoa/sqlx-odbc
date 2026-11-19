@@ -1,6 +1,6 @@
 use crate::{Odbc, OdbcConnection};
 
-/// Transaction manager placeholder for ODBC.
+/// Manages ODBC transactions using the connection’s autocommit mode.
 pub struct OdbcTransactionManager;
 
 impl sqlx_core::transaction::TransactionManager for OdbcTransactionManager {

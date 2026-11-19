@@ -310,7 +310,10 @@ impl sqlx_core::types::Type<crate::Odbc> for bool {
     }
 
     fn compatible(ty: &crate::OdbcTypeInfo) -> bool {
-        ty.data_type().accepts_numeric_data() || ty.data_type().accepts_character_data()
+        let data_type = ty.data_type();
+        data_type == odbc_api::DataType::Bit
+            || data_type.accepts_numeric_data()
+            || data_type.accepts_character_data()
     }
 }
 

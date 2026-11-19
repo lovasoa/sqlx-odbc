@@ -6,13 +6,13 @@ crates published to crates.io and must not use `path =` dependencies.
 Run fast unit tests:
 
 ```sh
-cargo test
+cargo test --locked --lib
 ```
 
 Run the ODBC integration tests:
 
 ```sh
-ODBC_DATABASE_URL='DSN=MyDataSource;UID=user;PWD=password' cargo test --test odbc
+ODBC_DATABASE_URL='DSN=MyDataSource;UID=user;PWD=password' cargo test --locked --features runtime-tokio --test odbc
 ```
 
 If `ODBC_DATABASE_URL` is unset or blank, the integration test prints a skip message and exits

@@ -21,10 +21,7 @@ type SharedPreparedStatement = Arc<Mutex<PreparedStatement>>;
 type ExecuteResult = std::result::Result<Either<OdbcQueryResult, OdbcRow>, sqlx_core::Error>;
 type ExecuteSender = flume::Sender<ExecuteResult>;
 
-/// Blocking ODBC connection wrapper.
-///
-/// This is the minimal smoke-test surface. The SQLx async `Connection` and `Executor` traits will
-/// be implemented as the port progresses.
+/// An ODBC connection that implements the SQLx connection and executor traits.
 pub struct OdbcConnection {
     conn: odbc_api::SharedConnection<'static>,
     stmt_cache: StatementCache<SharedPreparedStatement>,

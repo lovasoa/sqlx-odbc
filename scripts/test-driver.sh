@@ -88,4 +88,4 @@ case "$driver" in
 esac
 
 echo "running sqlx-odbc integration tests with driver: ${driver}"
-ODBC_TEST_REQUIRED=1 cargo test --features runtime-tokio --test odbc "$@"
+ODBC_TEST_REQUIRED=1 cargo test --locked --features runtime-tokio --test odbc "$@"

@@ -97,8 +97,6 @@ impl OdbcConnectOptions {
     }
 
     /// Opens a blocking ODBC connection.
-    ///
-    /// The full SQLx async connection/executor API will be layered on top of this during the port.
     pub fn connect_blocking(&self) -> Result<OdbcConnection> {
         OdbcConnection::connect_blocking(self)
     }
