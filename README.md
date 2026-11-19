@@ -55,6 +55,12 @@ let mut conn = sqlx_core::any::AnyConnection::connect(
 .await?;
 ```
 
+## Local timestamps
+
+With the `chrono` feature, a `DateTime<Local>` bound to an ODBC timestamp uses
+UTC. Earlier versions wrote local wall-clock time. Check existing data before
+mixing old and new writers for the same timestamp column.
+
 ## ODBC Setup
 
 ODBC uses two native pieces outside this crate:

@@ -127,7 +127,7 @@ impl<'q> Encode<'q, Odbc> for DateTime<FixedOffset> {
 impl<'q> Encode<'q, Odbc> for DateTime<Local> {
     fn encode_by_ref(&self, buf: &mut Vec<OdbcArgumentValue>) -> Result<IsNull, BoxDynError> {
         buf.push(OdbcArgumentValue::Timestamp(timestamp_from_naive(
-            self.naive_local(),
+            self.naive_utc(),
         )));
         Ok(IsNull::No)
     }
@@ -345,14 +345,6 @@ impl<'r> Decode<'r, Odbc> for DateTime<FixedOffset> {
 
 impl<'r> Decode<'r, Odbc> for DateTime<Local> {
     fn decode(value: OdbcValueRef<'r>) -> Result<Self, BoxDynError> {
-        if let Some(timestamp) = raw_timestamp(value) {
-            return Ok(DateTime::<Utc>::from_naive_utc_and_offset(
-                naive_from_timestamp(timestamp)?,
-                Utc,
-            )
-            .with_timezone(&Local));
-        }
-
         Ok(<DateTime<Utc> as Decode<Odbc>>::decode(value)?.with_timezone(&Local))
     }
 }
@@ -488,6 +480,29 @@ mod tests {
         let utc = DateTime::<Utc>::from_naive_utc_and_offset(datetime, Utc);
         let _ = <DateTime<Utc> as Encode<Odbc>>::encode(utc, &mut buf)?;
         assert_eq!(buf, vec![OdbcArgumentValue::Text(utc.to_rfc3339())]);
+
+        Ok(())
+    }
+
+    #[test]
+    fn local_datetime_preserves_the_instant_in_a_timestamp() -> Result<(), BoxDynError> {
+        let utc = NaiveDate::from_ymd_opt(2020, 1, 2)
+            .unwrap()
+            .and_hms_opt(23, 30, 0)
+            .unwrap();
+        let local =
+            DateTime::<Local>::from_naive_utc_and_offset(utc, FixedOffset::east_opt(3600).unwrap());
+
+        let mut buf = Vec::new();
+        let _ = <DateTime<Local> as Encode<Odbc>>::encode(local, &mut buf)?;
+        let [OdbcArgumentValue::Timestamp(timestamp)] = buf.as_slice() else {
+            panic!("expected an ODBC timestamp");
+        };
+        let value = OdbcValue::new(OdbcValueKind::Timestamp(*timestamp));
+        assert_eq!(
+            <DateTime<Local> as Decode<Odbc>>::decode(value.as_ref())?,
+            local
+        );
 
         Ok(())
     }
