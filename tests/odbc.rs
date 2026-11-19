@@ -422,6 +422,28 @@ async fn sqlx_query_fetches_basic_row_in_buffered_mode_when_configured(
 }
 
 #[tokio::test]
+async fn unbuffered_fetch_preserves_unsigned_integer_ranges_when_supported(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let Some(mut conn) = get_test_conn("ODBC unsigned integer test").await? else {
+        return Ok(());
+    };
+    if !conn.dbms_name()?.eq_ignore_ascii_case("DuckDB") {
+        return Ok(());
+    }
+
+    let row = sqlx_core::query::query(
+        "SELECT CAST(255 AS UTINYINT), CAST(65535 AS USMALLINT), CAST(4294967295 AS UINTEGER)",
+    )
+    .fetch_one(&mut conn)
+    .await?;
+    assert_eq!(row.try_get::<u8, _>(0)?, u8::MAX);
+    assert_eq!(row.try_get::<u16, _>(1)?, u16::MAX);
+    assert_eq!(row.try_get::<u32, _>(2)?, u32::MAX);
+    conn.close().await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn sqlx_query_decodes_decimal_integer_when_configured(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let Some(mut conn) = get_test_conn("ODBC SQLx decimal integer decode test").await? else {
