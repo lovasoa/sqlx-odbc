@@ -839,7 +839,7 @@ fn map_buffer_desc(data_type: DataType, max_column_size: usize) -> BufferDesc {
         | DataType::Other { .. }
         | DataType::Unknown
         | DataType::Decimal { .. }
-        | DataType::Numeric { .. } => BufferDesc::Text {
+        | DataType::Numeric { .. } => BufferDesc::WText {
             max_str_len: max_column_size,
         },
     }
@@ -886,18 +886,6 @@ fn buffered_column_values(
         BufferDesc::Timestamp { nullable } => {
             buffered_numeric(&slice, desc, nullable, OdbcValueKind::Timestamp)?
         }
-        BufferDesc::Text { .. } => {
-            let text = expect_buffer_slice(slice.as_text(), desc)?;
-            text.iter()
-                .map(|value| {
-                    value
-                        .map(|bytes| {
-                            OdbcValueKind::Text(String::from_utf8_lossy(bytes).into_owned())
-                        })
-                        .unwrap_or(OdbcValueKind::Null)
-                })
-                .collect()
-        }
         BufferDesc::WText { .. } => {
             let text = expect_buffer_slice(slice.as_wide_text(), desc)?;
             text.iter()
@@ -919,7 +907,7 @@ fn buffered_column_values(
                 })
                 .collect()
         }
-        BufferDesc::Numeric => {
+        BufferDesc::Numeric | BufferDesc::Text { .. } => {
             return Err(sqlx_core::Error::Protocol(format!(
                 "unsupported ODBC buffer descriptor: {desc:?}"
             )))
@@ -1165,7 +1153,7 @@ mod tests {
     fn buffered_fetch_uses_configured_limits_for_variable_sized_data() {
         assert_eq!(
             map_buffer_desc(DataType::Varchar { length: None }, 32),
-            BufferDesc::Text { max_str_len: 32 }
+            BufferDesc::WText { max_str_len: 32 }
         );
         assert_eq!(
             map_buffer_desc(DataType::Varbinary { length: None }, 16),
