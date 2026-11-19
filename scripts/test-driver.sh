@@ -32,42 +32,24 @@ DUCKDB_SKIP_ARGS=(
     --skip sqlx_query_decodes_decimal_integer_in_buffered_mode_when_configured
 )
 
-tmp_dir="$(mktemp -d)"
-cleanup() {
-    rm -rf "$tmp_dir"
-}
-trap cleanup EXIT
-
 case "$driver" in
     duckdb)
+        tmp_dir="$(mktemp -d)"
+        trap 'rm -rf "$tmp_dir"' EXIT
         duckdb_driver="${DUCKDB_ODBC_DRIVER:-DuckDB}"
         export ODBC_DATABASE_URL="Driver=${duckdb_driver};Database=${tmp_dir}/sqlx-odbc.duckdb"
-        cargo_args=()
-        harness_args=()
-        found_separator=0
 
+        needs_separator=true
         for arg in "$@"; do
-            if [[ "$arg" == "--" && "$found_separator" -eq 0 ]]; then
-                found_separator=1
-                continue
-            fi
-
-            if [[ "$found_separator" -eq 0 ]]; then
-                cargo_args+=("$arg")
-            else
-                harness_args+=("$arg")
+            if [[ "$arg" == -- ]]; then
+                needs_separator=false
+                break
             fi
         done
-
-        if [[ "${#cargo_args[@]}" -eq 0 && "${#harness_args[@]}" -eq 0 ]]; then
-            set -- -- "${DUCKDB_SKIP_ARGS[@]}"
-        elif [[ "${#cargo_args[@]}" -eq 0 ]]; then
-            set -- -- "${harness_args[@]}" "${DUCKDB_SKIP_ARGS[@]}"
-        elif [[ "${#harness_args[@]}" -eq 0 ]]; then
-            set -- "${cargo_args[@]}" -- "${DUCKDB_SKIP_ARGS[@]}"
-        else
-            set -- "${cargo_args[@]}" -- "${harness_args[@]}" "${DUCKDB_SKIP_ARGS[@]}"
+        if [[ "$needs_separator" == true ]]; then
+            set -- "$@" --
         fi
+        set -- "$@" "${DUCKDB_SKIP_ARGS[@]}"
         ;;
     postgres)
         postgres_driver="${POSTGRES_ODBC_DRIVER:-PostgreSQL Unicode}"
