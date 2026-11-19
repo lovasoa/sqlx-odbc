@@ -101,6 +101,16 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
+      - name: Verify release tag
+        run: |
+          version="$(cargo metadata --locked --no-deps --format-version 1 \
+            | python3 -c 'import json, sys; print(json.load(sys.stdin)["packages"][0]["version"])')"
+          expected_tag="v$version"
+          if [[ "$GITHUB_REF_NAME" != "$expected_tag" ]]; then
+            printf 'Release tag %s does not match expected tag %s.\n' "$GITHUB_REF_NAME" "$expected_tag" >&2
+            exit 1
+          fi
+
       - uses: Swatinem/rust-cache@v2
 
       - name: Install ODBC headers
