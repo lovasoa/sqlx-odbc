@@ -681,19 +681,30 @@ async fn wrong_parameter_count_errors_when_configured() -> Result<(), Box<dyn st
         return Ok(());
     };
 
-    let error = sqlx_core::query::query("SELECT ? AS value")
-        .fetch_one(&mut conn)
-        .await
-        .expect_err("query with a missing bind parameter should fail");
-    assert!(
-        matches!(
-            error,
-            sqlx_core::error::Error::Database(_)
-                | sqlx_core::error::Error::Protocol(_)
-                | sqlx_core::error::Error::Encode(_)
-        ),
-        "{error:?} should report a normal parameter-count failure"
-    );
+    for persistent in [true, false] {
+        let missing = sqlx_core::query::query("SELECT CAST(? AS INTEGER) AS value")
+            .persistent(persistent)
+            .fetch_one(&mut conn)
+            .await
+            .expect_err("a missing parameter must fail");
+        assert!(matches!(missing, sqlx_core::Error::Protocol(_)));
+
+        let extra = sqlx_core::query::query("SELECT CAST(? AS INTEGER) AS value")
+            .persistent(persistent)
+            .bind(1_i32)
+            .bind(2_i32)
+            .fetch_one(&mut conn)
+            .await
+            .expect_err("an extra parameter must fail");
+        assert!(matches!(extra, sqlx_core::Error::Protocol(_)));
+
+        let row = sqlx_core::query::query("SELECT CAST(? AS INTEGER) AS value")
+            .persistent(persistent)
+            .bind(3_i32)
+            .fetch_one(&mut conn)
+            .await?;
+        assert_eq!(row.try_get::<i32, _>(0)?, 3);
+    }
 
     conn.close().await?;
     Ok(())
