@@ -15,6 +15,7 @@ use sqlx_core::any::{
 use sqlx_core::column::Column;
 use sqlx_core::connection::{ConnectOptions, Connection};
 use sqlx_core::database::Database;
+use sqlx_core::executor::Executor;
 use sqlx_core::ext::ustr::UStr;
 use sqlx_core::row::Row;
 use sqlx_core::sql_str::SqlStr;
@@ -85,20 +86,15 @@ impl AnyConnectionBackend for OdbcConnection {
             Ok(arguments) => arguments,
             Err(error) => return stream::once(future::ready(Err(error))).boxed(),
         };
-        let rx = self.execute_receiver(query, persistent, arguments);
-
-        stream::unfold(rx, |rx| async move {
-            let item = rx.recv_async().await.ok()?;
-            Some((item, rx))
-        })
-        .map(|item| match item? {
-            Either::Left(result) => Ok(Either::Left(map_result(result))),
-            Either::Right(row) => {
-                let column_names = column_names(row.columns());
-                AnyRow::map_from(&row, column_names).map(Either::Right)
-            }
-        })
-        .boxed()
+        self.execute_stream(query, persistent, arguments)
+            .map(|item| match item? {
+                Either::Left(result) => Ok(Either::Left(map_result(result))),
+                Either::Right(row) => {
+                    let column_names = column_names(row.columns());
+                    AnyRow::map_from(&row, column_names).map(Either::Right)
+                }
+            })
+            .boxed()
     }
 
     fn fetch_optional(
@@ -110,18 +106,13 @@ impl AnyConnectionBackend for OdbcConnection {
         let arguments = arguments.map(map_arguments).transpose();
 
         Box::pin(async move {
-            let arguments = arguments?;
-            let rx = self.execute_receiver(query, persistent, arguments);
-            while let Ok(item) = rx.recv_async().await {
-                match item? {
-                    Either::Left(_) => {}
-                    Either::Right(row) => {
-                        let column_names = column_names(row.columns());
-                        return AnyRow::map_from(&row, column_names).map(Some);
-                    }
-                }
-            }
-            Ok(None)
+            self.fetch_first_row(query, persistent, arguments?)
+                .await?
+                .map(|row| {
+                    let column_names = column_names(row.columns());
+                    AnyRow::map_from(&row, column_names)
+                })
+                .transpose()
         })
     }
 
@@ -131,7 +122,7 @@ impl AnyConnectionBackend for OdbcConnection {
         _parameters: &[AnyTypeInfo],
     ) -> BoxFuture<'c, sqlx_core::Result<AnyStatement>> {
         Box::pin(async move {
-            let statement = self.prepare_blocking(sql)?;
+            let statement = Executor::prepare_with(self, sql, &[]).await?;
             let column_names = column_names(statement.columns());
             AnyStatement::try_from_statement(statement, column_names)
         })

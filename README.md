@@ -43,6 +43,11 @@ SQLx `query()` uses the driver's prepared-statement parameter count to check
 binds. Use `sqlx_core::raw_sql::raw_sql()` for SQL that needs direct execution
 without bind parameters.
 
+Each open connection uses a worker thread for blocking ODBC calls. Dropping a
+query stream stops delivery and lets the worker release its cursor before
+running the next operation. A native ODBC call already in progress can still
+run to completion.
+
 ## Any Driver
 
 Install this crate explicitly before opening ODBC URLs through SQLx
