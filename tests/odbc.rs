@@ -422,6 +422,31 @@ async fn sqlx_query_fetches_basic_row_in_buffered_mode_when_configured(
 }
 
 #[tokio::test]
+async fn buffered_fetch_reads_unicode_and_null_text_when_supported(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let Some(mut conn) = get_test_conn_with("ODBC buffered Unicode test", |options| {
+        options.max_column_size(Some(64));
+    })
+    .await?
+    else {
+        return Ok(());
+    };
+    if !conn.dbms_name()?.eq_ignore_ascii_case("PostgreSQL") {
+        return Ok(());
+    }
+
+    let row = sqlx_core::query::query(
+        "SELECT CAST('héllo 水 🦀' AS VARCHAR(32)), CAST(NULL AS VARCHAR(32))",
+    )
+    .fetch_one(&mut conn)
+    .await?;
+    assert_eq!(row.try_get::<String, _>(0)?, "héllo 水 🦀");
+    assert_eq!(row.try_get::<Option<String>, _>(1)?, None);
+    conn.close().await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn sqlx_query_decodes_decimal_integer_when_configured(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let Some(mut conn) = get_test_conn("ODBC SQLx decimal integer decode test").await? else {

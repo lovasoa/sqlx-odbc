@@ -14,7 +14,8 @@ use url::Url;
 pub struct OdbcBufferSettings {
     /// Number of rows fetched in each batch.
     pub batch_size: usize,
-    /// Maximum text or binary column size in buffered mode, or `None` for unbuffered mode.
+    /// Maximum UTF-16 code units for text or bytes for binary data in buffered mode.
+    /// `None` selects unbuffered mode.
     pub max_column_size: Option<usize>,
 }
 
@@ -67,7 +68,8 @@ impl OdbcConnectOptions {
         self
     }
 
-    /// Sets the maximum buffered column size, or `None` for unbuffered fetching.
+    /// Sets the buffered column limit in UTF-16 code units for text or bytes for binary data.
+    /// Pass `None` for unbuffered fetching.
     pub fn max_column_size(&mut self, max_column_size: Option<usize>) -> &mut Self {
         if let Some(size) = max_column_size {
             assert!(size > 0, "max_column_size must be greater than 0");
