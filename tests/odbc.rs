@@ -92,20 +92,23 @@ fn any_database_url(test_name: &str) -> Option<String> {
     })
 }
 
-async fn get_any_test_conn(
-    test_name: &str,
-) -> Result<Option<sqlx_core::any::AnyConnection>, Box<dyn std::error::Error>> {
+fn install_any_driver() {
     static INSTALL: Once = Once::new();
-
-    let Some(url) = any_database_url(test_name) else {
-        return Ok(None);
-    };
 
     INSTALL.call_once(|| {
         sqlx_core::any::driver::install_drivers(ANY_DRIVERS)
             .expect("ODBC Any driver should install once");
     });
+}
 
+async fn get_any_test_conn(
+    test_name: &str,
+) -> Result<Option<sqlx_core::any::AnyConnection>, Box<dyn std::error::Error>> {
+    let Some(url) = any_database_url(test_name) else {
+        return Ok(None);
+    };
+
+    install_any_driver();
     Ok(Some(sqlx_core::any::AnyConnection::connect(&url).await?))
 }
 
@@ -993,6 +996,49 @@ async fn any_connection_recovers_after_query_error_when_configured(
     assert_eq!(row.try_get::<i32, _>("value")?, 1);
 
     conn.close().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn any_pool_recovers_after_repeated_failed_inserts_when_configured(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let Some(url) = any_database_url("Any ODBC pool recovery test") else {
+        return Ok(());
+    };
+    install_any_driver();
+    let pool = sqlx_core::any::AnyPoolOptions::new()
+        .max_connections(2)
+        .connect(&url)
+        .await?;
+    let table = test_table_name("any_pool_recovery");
+    let create = format!("CREATE TABLE {table} (id INTEGER PRIMARY KEY)");
+    sqlx_core::query::query(AssertSqlSafe(create))
+        .execute(&pool)
+        .await?;
+
+    let insert = format!("INSERT INTO {table} VALUES (?)");
+    sqlx_core::query::query(AssertSqlSafe(insert.as_str()))
+        .bind(1_i32)
+        .execute(&pool)
+        .await?;
+    for _ in 0..10 {
+        let error = sqlx_core::query::query(AssertSqlSafe(insert.as_str()))
+            .bind(1_i32)
+            .execute(&pool)
+            .await
+            .expect_err("duplicate key should fail");
+        assert!(matches!(error, sqlx_core::Error::Database(_)));
+    }
+    let result = sqlx_core::query::query(AssertSqlSafe(insert))
+        .bind(2_i32)
+        .execute(&pool)
+        .await?;
+    assert_eq!(result.rows_affected(), 1);
+    let drop = format!("DROP TABLE {table}");
+    sqlx_core::query::query(AssertSqlSafe(drop))
+        .execute(&pool)
+        .await?;
+    pool.close().await;
     Ok(())
 }
 
