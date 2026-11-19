@@ -263,17 +263,15 @@ impl OdbcConnection {
         arguments: Option<OdbcArguments>,
     ) -> flume::Receiver<ExecuteResult> {
         let (tx, rx) = flume::bounded(64);
-        let has_arguments = arguments
-            .as_ref()
-            .is_some_and(|arguments| !arguments.is_empty());
-        let maybe_prepared = match self.maybe_prepare_for_execution(&sql, persistent, has_arguments)
-        {
-            Ok(maybe_prepared) => maybe_prepared,
-            Err(error) => {
-                let _ = tx.send(Err(error));
-                return rx;
-            }
-        };
+        let argument_count = arguments.as_ref().map(OdbcArguments::len);
+        let maybe_prepared =
+            match self.maybe_prepare_for_execution(&sql, persistent, argument_count) {
+                Ok(maybe_prepared) => maybe_prepared,
+                Err(error) => {
+                    let _ = tx.send(Err(error));
+                    return rx;
+                }
+            };
         let buffer_settings = self.buffer_settings;
 
         std::thread::spawn(move || {
@@ -291,22 +289,17 @@ impl OdbcConnection {
         &mut self,
         sql: &sqlx_core::sql_str::SqlStr,
         persistent: bool,
-        has_arguments: bool,
+        argument_count: Option<usize>,
     ) -> std::result::Result<MaybePrepared, sqlx_core::Error> {
-        if !persistent || !self.stmt_cache.is_enabled() {
+        let Some(argument_count) = argument_count else {
             return Ok(MaybePrepared::NotPrepared(Arc::clone(&self.conn)));
-        }
+        };
 
-        if let Some(prepared) = self
-            .stmt_cache
-            .get_mut(sql.as_str())
-            .map(|prepared| Arc::clone(&*prepared))
-        {
-            return Ok(MaybePrepared::Prepared(prepared));
-        }
-
-        if !has_arguments {
-            return Ok(MaybePrepared::NotPrepared(Arc::clone(&self.conn)));
+        let cache = persistent && self.stmt_cache.is_enabled();
+        if cache {
+            if let Some(prepared) = self.stmt_cache.get_mut(sql.as_str()) {
+                return Ok(MaybePrepared::Prepared(Arc::clone(prepared)));
+            }
         }
 
         let prepared = Arc::clone(&self.conn)
@@ -315,13 +308,15 @@ impl OdbcConnection {
                 sqlx_core::Error::from(crate::error::database_error_with_context(
                     error,
                     format!(
-                        "failed to prepare cached ODBC statement: `{}`",
+                        "failed to prepare ODBC statement for execution: `{}`",
                         sql_preview(sql.as_str())
                     ),
                 ))
             })?;
         let prepared = Arc::new(Mutex::new(prepared));
-        self.stmt_cache.insert(sql.as_str(), Arc::clone(&prepared));
+        if cache && argument_count > 0 {
+            self.stmt_cache.insert(sql.as_str(), Arc::clone(&prepared));
+        }
 
         Ok(MaybePrepared::Prepared(prepared))
     }
@@ -471,14 +466,29 @@ fn execute_sql_to_channel(
         MaybePrepared::Prepared(prepared) => {
             let mut prepared = prepared.lock().map_err(|_| {
                 sqlx_core::Error::Protocol(
-                    "ODBC execute: failed to lock cached statement".to_owned(),
+                    "ODBC execute: failed to lock prepared statement".to_owned(),
                 )
             })?;
+
+            let supplied = parameters.as_slice().len();
+            let expected = usize::from(prepared.num_params().map_err(|error| {
+                crate::error::database_error_with_context_lazy(error, || {
+                    format!(
+                        "failed to read ODBC parameter count for query: `{}`",
+                        sql_preview(sql.as_str())
+                    )
+                })
+            })?);
+            if supplied != expected {
+                return Err(sqlx_core::Error::Protocol(format!(
+                    "ODBC query expects {expected} bind parameters, but received {supplied}"
+                )));
+            }
 
             if let Some(cursor) = prepared.execute(parameters.as_slice()).map_err(|error| {
                 crate::error::database_error_with_context_lazy(error, || {
                     format!(
-                        "failed to execute cached ODBC statement: `{}`",
+                        "failed to execute prepared ODBC statement: `{}`",
                         sql_preview(sql.as_str())
                     )
                 })
@@ -490,7 +500,7 @@ fn execute_sql_to_channel(
             let rows_affected = prepared.row_count().map_err(|error| {
                 crate::error::database_error_with_context_lazy(error, || {
                     format!(
-                        "failed to read ODBC row count for cached statement: `{}`",
+                        "failed to read ODBC row count for prepared statement: `{}`",
                         sql_preview(sql.as_str())
                     )
                 })

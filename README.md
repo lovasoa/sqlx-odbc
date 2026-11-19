@@ -39,6 +39,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 `OdbcConnection::connect()` accepts a standard ODBC connection string, a bare
 DSN name, or the legacy `odbc:` prefix.
 
+SQLx `query()` uses the driver's prepared-statement parameter count to check
+binds. Use `sqlx_core::raw_sql::raw_sql()` for SQL that needs direct execution
+without bind parameters.
+
 ## Any Driver
 
 Install this crate explicitly before opening ODBC URLs through SQLx
