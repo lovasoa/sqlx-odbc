@@ -1,6 +1,6 @@
 use crate::{Odbc, OdbcConnection};
 
-/// Manages ODBC transactions using the connection’s autocommit mode.
+/// Manages ODBC transactions using the connection's autocommit mode.
 pub struct OdbcTransactionManager;
 
 impl sqlx_core::transaction::TransactionManager for OdbcTransactionManager {
@@ -10,15 +10,15 @@ impl sqlx_core::transaction::TransactionManager for OdbcTransactionManager {
         conn: &mut OdbcConnection,
         _statement: Option<sqlx_core::sql_str::SqlStr>,
     ) -> Result<(), sqlx_core::Error> {
-        conn.begin_blocking()
+        conn.begin_transaction().await
     }
 
     async fn commit(conn: &mut OdbcConnection) -> Result<(), sqlx_core::Error> {
-        conn.commit_blocking()
+        conn.commit_transaction().await
     }
 
     async fn rollback(conn: &mut OdbcConnection) -> Result<(), sqlx_core::Error> {
-        conn.rollback_blocking()
+        conn.rollback_transaction().await
     }
 
     fn start_rollback(conn: &mut OdbcConnection) {

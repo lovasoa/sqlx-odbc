@@ -4,29 +4,48 @@ use crate::{
 };
 use futures_core::future::BoxFuture;
 use futures_core::stream::BoxStream;
-use futures_util::{future, stream, StreamExt};
+use futures_util::{future, stream, StreamExt, TryStreamExt};
 use odbc_api::buffers::{AnyColumnBufferSlice, BufferDesc, ColumnarDynBuffer, NullableSlice};
-use odbc_api::{ConnectionTransitions, Cursor, DataType, Nullable, ResultSetMetadata};
+use odbc_api::{Cursor, DataType, Nullable, ResultSetMetadata};
 use sqlx_core::column::Column;
 use sqlx_core::common::StatementCache;
 use sqlx_core::executor::{Execute, Executor};
 use sqlx_core::transaction::Transaction;
 use sqlx_core::Either;
 use std::future::Future;
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 
-type PreparedStatement =
-    odbc_api::Prepared<odbc_api::handles::StatementConnection<odbc_api::SharedConnection<'static>>>;
-type SharedPreparedStatement = Arc<Mutex<PreparedStatement>>;
-type ExecuteResult = std::result::Result<Either<OdbcQueryResult, OdbcRow>, sqlx_core::Error>;
-type ExecuteSender = flume::Sender<ExecuteResult>;
+type PreparedStatement<'c> = odbc_api::Prepared<odbc_api::handles::StatementImpl<'c>>;
+type QueryItem = Either<OdbcQueryResult, OdbcRow>;
+type ExecuteResult = sqlx_core::Result<QueryItem>;
+type ExecuteSender = flume::Sender<QueryMessage>;
+type Job = Box<dyn FnOnce(&mut ConnectionState<'_>) + Send>;
 
-/// An ODBC connection that implements the SQLx connection and executor traits.
+enum QueryMessage {
+    Item(QueryItem),
+    Complete(sqlx_core::Result<()>),
+}
+
+/// A SQLx connection whose blocking ODBC operations run on a dedicated thread.
 pub struct OdbcConnection {
-    conn: odbc_api::SharedConnection<'static>,
-    stmt_cache: StatementCache<SharedPreparedStatement>,
+    jobs: flume::Sender<Job>,
+    stopped: flume::Receiver<()>,
+    status: Arc<ConnectionStatus>,
+}
+
+#[derive(Default)]
+struct ConnectionStatus {
+    cached_statements: AtomicUsize,
+    transaction_depth: AtomicUsize,
+}
+
+struct ConnectionState<'c> {
+    conn: &'c odbc_api::Connection<'static>,
+    stmt_cache: StatementCache<PreparedStatement<'c>>,
     buffer_settings: OdbcBufferSettings,
-    transaction_depth: usize,
+    status: Arc<ConnectionStatus>,
+    broken: bool,
 }
 
 impl std::fmt::Debug for OdbcConnection {
@@ -36,208 +55,355 @@ impl std::fmt::Debug for OdbcConnection {
 }
 
 impl OdbcConnection {
-    /// Opens a blocking ODBC connection with the provided options.
+    /// Opens an ODBC connection and waits for it on the calling thread.
     pub fn connect_blocking(options: &OdbcConnectOptions) -> Result<Self> {
-        let env = odbc_api::environment().map_err(|error| {
-            crate::OdbcError::Configuration(format!(
-                "failed to initialize the process-wide ODBC environment: {error}"
+        let (connection, ready) = Self::start(options)?;
+        ready.recv().map_err(|_| {
+            crate::OdbcError::Configuration(
+                "ODBC connection worker stopped while opening".to_owned(),
+            )
+        })??;
+        Ok(connection)
+    }
+
+    pub(crate) async fn connect_async(
+        options: &OdbcConnectOptions,
+    ) -> std::result::Result<Self, sqlx_core::Error> {
+        let (connection, ready) = Self::start(options)?;
+        ready.recv_async().await.map_err(|_| worker_stopped())??;
+        Ok(connection)
+    }
+
+    fn start(options: &OdbcConnectOptions) -> Result<(Self, flume::Receiver<Result<()>>)> {
+        let (jobs, pending) = flume::unbounded::<Job>();
+        let (ready, opened) = flume::bounded(1);
+        let (finished, stopped) = flume::bounded(1);
+        let status = Arc::new(ConnectionStatus::default());
+        let worker_status = Arc::clone(&status);
+        let options = options.clone();
+
+        std::thread::Builder::new()
+            .name("sqlx-odbc".to_owned())
+            .spawn(move || {
+                let conn = match open_connection(&options) {
+                    Ok(conn) => conn,
+                    Err(error) => {
+                        let _ = ready.send(Err(error));
+                        return;
+                    }
+                };
+
+                let mut state = ConnectionState {
+                    conn: &conn,
+                    stmt_cache: StatementCache::new(options.statement_cache_capacity),
+                    buffer_settings: options.buffer_settings,
+                    status: worker_status,
+                    broken: false,
+                };
+
+                if ready.send(Ok(())).is_err() {
+                    return;
+                }
+
+                // A dropped transaction must be able to queue its rollback without blocking.
+                // Run each request to completion, including cursor cleanup, before taking another.
+                while let Ok(job) = pending.recv() {
+                    job(&mut state);
+                    if state.broken {
+                        break;
+                    }
+                }
+
+                drop(pending);
+                drop(state);
+                drop(conn);
+                let _ = finished.send(());
+            })
+            .map_err(|error| {
+                crate::OdbcError::Configuration(format!("failed to start ODBC worker: {error}"))
+            })?;
+
+        Ok((
+            Self {
+                jobs,
+                stopped,
+                status,
+            },
+            opened,
+        ))
+    }
+
+    fn request<T: Send + 'static>(
+        &self,
+        job: impl FnOnce(&mut ConnectionState<'_>) -> sqlx_core::Result<T> + Send + 'static,
+    ) -> sqlx_core::Result<flume::Receiver<sqlx_core::Result<T>>> {
+        let (reply, result) = flume::bounded(1);
+        self.jobs
+            .send(Box::new(move |state| {
+                if !reply.is_disconnected() {
+                    let _ = reply.send(job(state));
+                }
+            }))
+            .map_err(|_| worker_stopped())?;
+        Ok(result)
+    }
+
+    async fn request_async<T: Send + 'static>(
+        &self,
+        job: impl FnOnce(&mut ConnectionState<'_>) -> sqlx_core::Result<T> + Send + 'static,
+    ) -> std::result::Result<T, sqlx_core::Error> {
+        self.request(job)?
+            .recv_async()
+            .await
+            .map_err(|_| worker_stopped())?
+    }
+
+    /// Executes a minimal connectivity query, blocking the calling thread.
+    pub fn ping_blocking(&mut self) -> std::result::Result<(), sqlx_core::Error> {
+        self.request(|state| state.ping())?
+            .recv()
+            .map_err(|_| worker_stopped())?
+    }
+
+    /// Returns the DBMS name reported by the ODBC driver, blocking the calling thread.
+    pub fn dbms_name(&self) -> std::result::Result<String, sqlx_core::Error> {
+        self.request(|state| state.dbms_name())?
+            .recv()
+            .map_err(|_| worker_stopped())?
+    }
+
+    /// Prepares a statement and returns its metadata, blocking the calling thread.
+    pub fn prepare_blocking(
+        &mut self,
+        sql: sqlx_core::sql_str::SqlStr,
+    ) -> std::result::Result<OdbcStatement, sqlx_core::Error> {
+        self.request(move |state| state.prepare(sql))?
+            .recv()
+            .map_err(|_| worker_stopped())?
+    }
+
+    pub(crate) async fn begin_transaction(&mut self) -> std::result::Result<(), sqlx_core::Error> {
+        let (reply, result) = flume::bounded(1);
+        let (acknowledge, acknowledged) = flume::bounded(1);
+        self.jobs
+            .send(Box::new(move |state| {
+                if reply.is_disconnected() {
+                    return;
+                }
+
+                match state.begin() {
+                    Ok(()) => {
+                        // A cancelled begin has no Transaction to enqueue its rollback.
+                        if reply.send(Ok(())).is_err() || acknowledged.recv().is_err() {
+                            state.rollback_on_drop();
+                        }
+                    }
+                    Err(error) => {
+                        let _ = reply.send(Err(error));
+                    }
+                }
+            }))
+            .map_err(|_| worker_stopped())?;
+
+        result.recv_async().await.map_err(|_| worker_stopped())??;
+        acknowledge.send(()).map_err(|_| worker_stopped())
+    }
+
+    pub(crate) async fn commit_transaction(&mut self) -> std::result::Result<(), sqlx_core::Error> {
+        self.request_async(|state| state.commit()).await
+    }
+
+    pub(crate) async fn rollback_transaction(
+        &mut self,
+    ) -> std::result::Result<(), sqlx_core::Error> {
+        self.request_async(|state| state.rollback()).await
+    }
+
+    pub(crate) fn start_rollback(&mut self) {
+        let _ = self.jobs.send(Box::new(|state| state.rollback_on_drop()));
+    }
+
+    pub(crate) fn transaction_depth(&self) -> usize {
+        self.status.transaction_depth.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn execute_stream(
+        &mut self,
+        sql: sqlx_core::sql_str::SqlStr,
+        persistent: bool,
+        arguments: Option<OdbcArguments>,
+    ) -> BoxStream<'_, ExecuteResult> {
+        stream::once(async move {
+            let (tx, rx) = flume::bounded(64);
+            self.jobs
+                .send(Box::new(move |state| {
+                    if !tx.is_disconnected() {
+                        let result = state.execute(sql, persistent, arguments, &tx);
+                        let _ = tx.send(QueryMessage::Complete(result));
+                    }
+                }))
+                .map_err(|_| worker_stopped())?;
+            Ok::<_, sqlx_core::Error>(rx)
+        })
+        .map_ok(receiver_to_stream)
+        .try_flatten()
+        .boxed()
+    }
+    pub(crate) async fn fetch_first_row(
+        &mut self,
+        sql: sqlx_core::sql_str::SqlStr,
+        persistent: bool,
+        arguments: Option<OdbcArguments>,
+    ) -> sqlx_core::Result<Option<OdbcRow>> {
+        let mut rows = self.execute_stream(sql, persistent, arguments);
+        while let Some(item) = rows.try_next().await? {
+            if let Either::Right(row) = item {
+                return Ok(Some(row));
+            }
+        }
+        Ok(None)
+    }
+}
+
+fn worker_stopped() -> sqlx_core::Error {
+    sqlx_core::Error::Protocol("ODBC connection worker stopped".to_owned())
+}
+
+fn open_connection(options: &OdbcConnectOptions) -> Result<odbc_api::Connection<'static>> {
+    let env = odbc_api::environment().map_err(|error| {
+        crate::OdbcError::Configuration(format!(
+            "failed to initialize the process-wide ODBC environment: {error}"
+        ))
+    })?;
+
+    env.connect_with_connection_string(options.connection_string(), Default::default())
+        .map_err(|error| {
+            crate::error::database_error_with_context(
+                error,
+                "failed to open ODBC connection using the supplied connection string",
+            )
+        })
+}
+
+impl<'c> ConnectionState<'c> {
+    fn ping(&mut self) -> std::result::Result<(), sqlx_core::Error> {
+        let query = self
+            .conn
+            .database_management_system_name()
+            .map(|name| ping_query_for_dbms_name(&name))
+            .unwrap_or("SELECT 1");
+
+        self.conn.execute(query, (), None).map_err(|error| {
+            sqlx_core::Error::from(crate::error::database_error_with_context(
+                error,
+                format!("ODBC ping query failed: `{query}`"),
             ))
         })?;
+        Ok(())
+    }
 
-        let conn = env
-            .connect_with_connection_string(options.connection_string(), Default::default())
+    fn dbms_name(&self) -> std::result::Result<String, sqlx_core::Error> {
+        self.conn
+            .database_management_system_name()
             .map_err(|error| {
-                crate::error::database_error_with_context(
-                    error,
-                    "failed to open ODBC connection using the supplied connection string",
-                )
-            })?;
-
-        Ok(Self {
-            conn: Arc::new(Mutex::new(conn)),
-            stmt_cache: StatementCache::new(options.statement_cache_capacity),
-            buffer_settings: options.buffer_settings,
-            transaction_depth: 0,
-        })
-    }
-
-    /// Executes a minimal connectivity query.
-    pub fn ping_blocking(&mut self) -> std::result::Result<(), sqlx_core::Error> {
-        let query = self
-            .with_conn("ping", |conn| {
-                Ok(conn
-                    .database_management_system_name()
-                    .map(|name| ping_query_for_dbms_name(&name))
-                    .unwrap_or("SELECT 1"))
-            })
-            .unwrap_or("SELECT 1");
-        self.with_conn("ping", |conn| {
-            conn.execute(query, (), None).map_err(|error| {
-                sqlx_core::Error::from(crate::error::database_error_with_context(
-                    error,
-                    format!("ODBC ping query failed: `{query}`"),
-                ))
-            })?;
-            Ok(())
-        })
-    }
-
-    fn with_conn<R>(
-        &self,
-        operation: &str,
-        f: impl FnOnce(&mut odbc_api::Connection<'static>) -> std::result::Result<R, sqlx_core::Error>,
-    ) -> std::result::Result<R, sqlx_core::Error> {
-        let mut conn = self.conn.lock().map_err(|_| {
-            sqlx_core::Error::Protocol(format!("ODBC {operation}: failed to lock connection"))
-        })?;
-        f(&mut conn)
-    }
-
-    /// Returns the DBMS name reported by the ODBC driver.
-    pub fn dbms_name(&self) -> std::result::Result<String, sqlx_core::Error> {
-        self.with_conn("dbms_name", |conn| {
-            conn.database_management_system_name().map_err(|error| {
                 sqlx_core::Error::from(crate::error::database_error_with_context(
                     error,
                     "failed to read the ODBC DBMS name from SQLGetInfo",
                 ))
             })
-        })
     }
 
-    pub(crate) fn begin_blocking(&mut self) -> std::result::Result<(), sqlx_core::Error> {
-        if self.transaction_depth > 0 {
+    fn begin(&mut self) -> std::result::Result<(), sqlx_core::Error> {
+        if self.status.transaction_depth.load(Ordering::Relaxed) > 0 {
             return Err(sqlx_core::Error::InvalidSavePointStatement);
         }
 
-        self.with_conn("begin", |conn| {
-            conn.set_autocommit(false).map_err(|error| {
-                sqlx_core::Error::from(crate::error::database_error_with_context(
-                    error,
-                    "failed to disable ODBC autocommit while beginning a transaction",
-                ))
-            })
+        self.conn.set_autocommit(false).map_err(|error| {
+            crate::error::database_error_with_context(
+                error,
+                "failed to disable ODBC autocommit while beginning a transaction",
+            )
         })?;
-        self.transaction_depth = 1;
+        self.status.transaction_depth.store(1, Ordering::Release);
         Ok(())
     }
 
-    pub(crate) fn commit_blocking(&mut self) -> std::result::Result<(), sqlx_core::Error> {
-        if self.transaction_depth == 0 {
+    fn commit(&mut self) -> std::result::Result<(), sqlx_core::Error> {
+        if self.status.transaction_depth.load(Ordering::Relaxed) == 0 {
             return Ok(());
         }
 
-        self.with_conn("commit", |conn| {
-            conn.commit().map_err(|error| {
-                sqlx_core::Error::from(crate::error::database_error_with_context(
-                    error,
-                    "failed to commit the active ODBC transaction",
-                ))
-            })?;
-            conn.set_autocommit(true).map_err(|error| {
-                sqlx_core::Error::from(crate::error::database_error_with_context(
-                    error,
-                    "failed to restore ODBC autocommit after commit",
-                ))
-            })
+        self.conn.commit().map_err(|error| {
+            crate::error::database_error_with_context(
+                error,
+                "failed to commit the active ODBC transaction",
+            )
         })?;
-        self.transaction_depth = 0;
-        Ok(())
+        self.restore_autocommit("commit")
     }
 
-    pub(crate) fn rollback_blocking(&mut self) -> std::result::Result<(), sqlx_core::Error> {
-        if self.transaction_depth == 0 {
+    fn rollback(&mut self) -> std::result::Result<(), sqlx_core::Error> {
+        if self.status.transaction_depth.load(Ordering::Relaxed) == 0 {
             return Ok(());
         }
 
-        self.with_conn("rollback", |conn| {
-            conn.rollback().map_err(|error| {
-                sqlx_core::Error::from(crate::error::database_error_with_context(
-                    error,
-                    "failed to roll back the active ODBC transaction",
-                ))
-            })?;
-            conn.set_autocommit(true).map_err(|error| {
-                sqlx_core::Error::from(crate::error::database_error_with_context(
-                    error,
-                    "failed to restore ODBC autocommit after rollback",
-                ))
-            })
+        self.conn.rollback().map_err(|error| {
+            crate::error::database_error_with_context(
+                error,
+                "failed to roll back the active ODBC transaction",
+            )
         })?;
-        self.transaction_depth = 0;
+        self.restore_autocommit("rollback")
+    }
+
+    fn restore_autocommit(&mut self, operation: &str) -> std::result::Result<(), sqlx_core::Error> {
+        if let Err(error) = self.conn.set_autocommit(true) {
+            self.broken = true;
+            return Err(crate::error::database_error_with_context(
+                error,
+                format!("failed to restore ODBC autocommit after {operation}"),
+            )
+            .into());
+        }
+        self.status.transaction_depth.store(0, Ordering::Release);
         Ok(())
     }
 
-    pub(crate) fn start_rollback(&mut self) {
-        if self.transaction_depth == 0 {
-            return;
-        }
-
-        if self
-            .with_conn("start_rollback", |conn| {
-                conn.rollback().map_err(|error| {
-                    sqlx_core::Error::from(crate::error::database_error_with_context(
-                        error,
-                        "failed to roll back the active ODBC transaction",
-                    ))
-                })?;
-                conn.set_autocommit(true).map_err(|error| {
-                    sqlx_core::Error::from(crate::error::database_error_with_context(
-                        error,
-                        "failed to restore ODBC autocommit after rollback",
-                    ))
-                })
-            })
-            .is_ok()
-        {
-            self.transaction_depth = 0;
+    fn rollback_on_drop(&mut self) {
+        if let Err(error) = self.rollback() {
+            log::warn!("ODBC connection discarded after rollback failed: {error}");
+            self.broken = true;
         }
     }
 
-    pub(crate) const fn transaction_depth(&self) -> usize {
-        self.transaction_depth
-    }
-
-    /// Prepares a statement and returns the metadata reported by the ODBC driver.
-    pub fn prepare_blocking(
+    fn prepare(
         &mut self,
         sql: sqlx_core::sql_str::SqlStr,
     ) -> std::result::Result<OdbcStatement, sqlx_core::Error> {
-        if let Some(prepared) = self
-            .stmt_cache
-            .get_mut(sql.as_str())
-            .map(|prepared| Arc::clone(&*prepared))
-        {
-            let mut prepared = prepared.lock().map_err(|_| {
-                sqlx_core::Error::Protocol(
-                    "ODBC prepare: failed to lock cached statement".to_owned(),
-                )
-            })?;
-            let parameters = prepared.num_params().map_err(|error| {
-                sqlx_core::Error::from(crate::error::database_error_with_context(
-                    error,
-                    format!(
-                        "failed to read ODBC parameter metadata for cached statement: `{}`",
-                        sql_preview(sql.as_str())
-                    ),
-                ))
-            })?;
-            let columns = collect_prepared_columns(&mut *prepared, parameters)?;
-
-            return Ok(OdbcStatement::new(sql, columns, usize::from(parameters)));
+        if let Some(prepared) = self.stmt_cache.get_mut(sql.as_str()) {
+            return Self::describe_prepared(prepared, sql);
         }
 
-        let mut prepared = Arc::clone(&self.conn)
-            .into_prepared(sql.as_str())
-            .map_err(|error| {
-                sqlx_core::Error::from(crate::error::database_error_with_context(
-                    error,
-                    format!(
-                        "failed to prepare ODBC statement: `{}`",
-                        sql_preview(sql.as_str())
-                    ),
-                ))
-            })?;
+        let mut prepared = self.conn.prepare(sql.as_str()).map_err(|error| {
+            sqlx_core::Error::from(crate::error::database_error_with_context(
+                error,
+                format!(
+                    "failed to prepare ODBC statement: `{}`",
+                    sql_preview(sql.as_str())
+                ),
+            ))
+        })?;
+        let statement = Self::describe_prepared(&mut prepared, sql.clone())?;
+        if self.stmt_cache.is_enabled() {
+            self.cache_statement(sql.as_str(), prepared);
+        }
+        Ok(statement)
+    }
+
+    fn describe_prepared(
+        prepared: &mut PreparedStatement<'_>,
+        sql: sqlx_core::sql_str::SqlStr,
+    ) -> std::result::Result<OdbcStatement, sqlx_core::Error> {
         let parameters = prepared.num_params().map_err(|error| {
             sqlx_core::Error::from(crate::error::database_error_with_context(
                 error,
@@ -247,78 +413,65 @@ impl OdbcConnection {
                 ),
             ))
         })?;
-        let columns = collect_prepared_columns(&mut prepared, parameters)?;
-        if self.stmt_cache.is_enabled() {
-            self.stmt_cache
-                .insert(sql.as_str(), Arc::new(Mutex::new(prepared)));
-        }
-
+        let columns = collect_prepared_columns(prepared, parameters)?;
         Ok(OdbcStatement::new(sql, columns, usize::from(parameters)))
     }
 
-    pub(crate) fn execute_receiver(
+    fn cache_statement(&mut self, sql: &str, prepared: PreparedStatement<'c>) {
+        self.stmt_cache.insert(sql, prepared);
+        self.update_cache_size();
+    }
+
+    fn update_cache_size(&self) {
+        self.status
+            .cached_statements
+            .store(self.stmt_cache.len(), Ordering::Release);
+    }
+
+    fn execute(
         &mut self,
         sql: sqlx_core::sql_str::SqlStr,
         persistent: bool,
         arguments: Option<OdbcArguments>,
-    ) -> flume::Receiver<ExecuteResult> {
-        let (tx, rx) = flume::bounded(64);
-        let argument_count = arguments.as_ref().map(OdbcArguments::len);
-        let maybe_prepared =
-            match self.maybe_prepare_for_execution(&sql, persistent, argument_count) {
-                Ok(maybe_prepared) => maybe_prepared,
-                Err(error) => {
-                    let _ = tx.send(Err(error));
-                    return rx;
-                }
-            };
-        let buffer_settings = self.buffer_settings;
-
-        std::thread::spawn(move || {
-            if let Err(error) =
-                execute_sql_to_channel(maybe_prepared, sql, arguments, buffer_settings, &tx)
-            {
-                let _ = tx.send(Err(error));
-            }
-        });
-
-        rx
-    }
-
-    fn maybe_prepare_for_execution(
-        &mut self,
-        sql: &sqlx_core::sql_str::SqlStr,
-        persistent: bool,
-        argument_count: Option<usize>,
-    ) -> std::result::Result<MaybePrepared, sqlx_core::Error> {
-        let Some(argument_count) = argument_count else {
-            return Ok(MaybePrepared::NotPrepared(Arc::clone(&self.conn)));
+        tx: &ExecuteSender,
+    ) -> std::result::Result<(), sqlx_core::Error> {
+        let sql = sql.as_str();
+        let Some(arguments) = arguments else {
+            return execute_direct(self.conn, sql, self.buffer_settings, tx);
         };
 
         let cache = persistent && self.stmt_cache.is_enabled();
-        if cache {
-            if let Some(prepared) = self.stmt_cache.get_mut(sql.as_str()) {
-                return Ok(MaybePrepared::Prepared(Arc::clone(prepared)));
+        let mut uncached = None;
+        if !cache || !self.stmt_cache.contains_key(sql) {
+            let prepared = self.conn.prepare(sql).map_err(|error| {
+                crate::error::database_error_with_context_lazy(error, || {
+                    format!(
+                        "failed to prepare ODBC statement for execution: `{}`",
+                        sql_preview(sql)
+                    )
+                })
+            })?;
+            if cache && !arguments.is_empty() {
+                self.cache_statement(sql, prepared);
+            } else {
+                uncached = Some(prepared);
             }
         }
 
-        let prepared = Arc::clone(&self.conn)
-            .into_prepared(sql.as_str())
-            .map_err(|error| {
-                sqlx_core::Error::from(crate::error::database_error_with_context(
-                    error,
-                    format!(
-                        "failed to prepare ODBC statement for execution: `{}`",
-                        sql_preview(sql.as_str())
-                    ),
-                ))
-            })?;
-        let prepared = Arc::new(Mutex::new(prepared));
-        if cache && argument_count > 0 {
-            self.stmt_cache.insert(sql.as_str(), Arc::clone(&prepared));
-        }
-
-        Ok(MaybePrepared::Prepared(prepared))
+        let prepared = match &mut uncached {
+            Some(prepared) => prepared,
+            None => self
+                .stmt_cache
+                .get_mut(sql)
+                .expect("statement already cached"),
+        };
+        execute_prepared(
+            prepared,
+            sql,
+            arguments.to_odbc_parameter_collection(),
+            self.buffer_settings,
+            tx,
+        )
     }
 }
 
@@ -327,8 +480,9 @@ impl sqlx_core::connection::Connection for OdbcConnection {
     type Options = OdbcConnectOptions;
 
     async fn close(self) -> std::result::Result<(), sqlx_core::Error> {
-        drop(self);
-        Ok(())
+        let Self { jobs, stopped, .. } = self;
+        drop(jobs);
+        stopped.recv_async().await.map_err(|_| worker_stopped())
     }
 
     async fn close_hard(self) -> std::result::Result<(), sqlx_core::Error> {
@@ -337,7 +491,7 @@ impl sqlx_core::connection::Connection for OdbcConnection {
     }
 
     async fn ping(&mut self) -> std::result::Result<(), sqlx_core::Error> {
-        self.ping_blocking()
+        self.request_async(|state| state.ping()).await
     }
 
     fn begin(
@@ -362,15 +516,19 @@ impl sqlx_core::connection::Connection for OdbcConnection {
     where
         Self::Database: sqlx_core::database::HasStatementCache,
     {
-        self.stmt_cache.len()
+        self.status.cached_statements.load(Ordering::Acquire)
     }
 
     async fn clear_cached_statements(&mut self) -> std::result::Result<(), sqlx_core::Error>
     where
         Self::Database: sqlx_core::database::HasStatementCache,
     {
-        self.stmt_cache.clear();
-        Ok(())
+        self.request_async(|state| {
+            state.stmt_cache.clear();
+            state.update_cache_size();
+            Ok(())
+        })
+        .await
     }
 }
 
@@ -392,7 +550,7 @@ impl<'c> Executor<'c> for &'c mut OdbcConnection {
         let sql = query.sql();
 
         match arguments {
-            Ok(arguments) => receiver_to_stream(self.execute_receiver(sql, persistent, arguments)),
+            Ok(arguments) => self.execute_stream(sql, persistent, arguments),
             Err(error) => stream::once(future::ready(Err(error))).boxed(),
         }
     }
@@ -411,16 +569,7 @@ impl<'c> Executor<'c> for &'c mut OdbcConnection {
         let persistent = query.persistent();
         let sql = query.sql();
 
-        Box::pin(async move {
-            let rx = self.execute_receiver(sql, persistent, arguments?);
-            while let Ok(item) = rx.recv_async().await {
-                match item? {
-                    Either::Right(row) => return Ok(Some(row)),
-                    Either::Left(_) => {}
-                }
-            }
-            Ok(None)
-        })
+        Box::pin(async move { self.fetch_first_row(sql, persistent, arguments?).await })
     }
 
     fn prepare_with<'e>(
@@ -431,118 +580,99 @@ impl<'c> Executor<'c> for &'c mut OdbcConnection {
     where
         'c: 'e,
     {
-        Box::pin(async move { self.prepare_blocking(sql) })
+        Box::pin(self.request_async(move |state| state.prepare(sql)))
     }
 }
 
-fn odbc_parameters(arguments: Option<&OdbcArguments>) -> OdbcParameterCollection {
-    arguments
-        .map(OdbcArguments::to_odbc_parameter_collection)
-        .unwrap_or_default()
-}
-
-enum MaybePrepared {
-    Prepared(SharedPreparedStatement),
-    NotPrepared(odbc_api::SharedConnection<'static>),
-}
-
-fn receiver_to_stream<'e>(rx: flume::Receiver<ExecuteResult>) -> BoxStream<'e, ExecuteResult> {
-    stream::unfold(rx, |rx| async move {
-        rx.recv_async().await.ok().map(|item| (item, rx))
+fn receiver_to_stream<'e>(rx: flume::Receiver<QueryMessage>) -> BoxStream<'e, ExecuteResult> {
+    stream::unfold(Some(rx), |rx| async move {
+        let rx = rx?;
+        match rx.recv_async().await {
+            Ok(QueryMessage::Item(item)) => Some((Ok(item), Some(rx))),
+            Ok(QueryMessage::Complete(Err(error))) => Some((Err(error), None)),
+            Ok(QueryMessage::Complete(Ok(()))) => None,
+            Err(_) => Some((Err(worker_stopped()), None)),
+        }
     })
     .boxed()
 }
 
-fn execute_sql_to_channel(
-    maybe_prepared: MaybePrepared,
-    sql: sqlx_core::sql_str::SqlStr,
-    arguments: Option<OdbcArguments>,
+fn execute_prepared(
+    prepared: &mut PreparedStatement<'_>,
+    sql: &str,
+    parameters: OdbcParameterCollection,
     buffer_settings: OdbcBufferSettings,
     tx: &ExecuteSender,
-) -> std::result::Result<(), sqlx_core::Error> {
-    let parameters = odbc_parameters(arguments.as_ref());
-
-    match maybe_prepared {
-        MaybePrepared::Prepared(prepared) => {
-            let mut prepared = prepared.lock().map_err(|_| {
-                sqlx_core::Error::Protocol(
-                    "ODBC execute: failed to lock prepared statement".to_owned(),
-                )
-            })?;
-
-            let supplied = parameters.as_slice().len();
-            let expected = usize::from(prepared.num_params().map_err(|error| {
-                crate::error::database_error_with_context_lazy(error, || {
-                    format!(
-                        "failed to read ODBC parameter count for query: `{}`",
-                        sql_preview(sql.as_str())
-                    )
-                })
-            })?);
-            if supplied != expected {
-                return Err(sqlx_core::Error::Protocol(format!(
-                    "ODBC query expects {expected} bind parameters, but received {supplied}"
-                )));
-            }
-
-            if let Some(cursor) = prepared.execute(parameters.as_slice()).map_err(|error| {
-                crate::error::database_error_with_context_lazy(error, || {
-                    format!(
-                        "failed to execute prepared ODBC statement: `{}`",
-                        sql_preview(sql.as_str())
-                    )
-                })
-            })? {
-                stream_result_sets(cursor, buffer_settings, tx)?;
-                return Ok(());
-            }
-
-            let rows_affected = prepared.row_count().map_err(|error| {
-                crate::error::database_error_with_context_lazy(error, || {
-                    format!(
-                        "failed to read ODBC row count for prepared statement: `{}`",
-                        sql_preview(sql.as_str())
-                    )
-                })
-            })?;
-            send_rows_affected(rows_affected, tx)
-        }
-        MaybePrepared::NotPrepared(conn) => {
-            let mut statement = conn.into_preallocated().map_err(|error| {
-                crate::error::database_error_with_context_lazy(error, || {
-                    format!(
-                        "failed to allocate an ODBC statement for query: `{}`",
-                        sql_preview(sql.as_str())
-                    )
-                })
-            })?;
-
-            if let Some(cursor) = statement
-                .execute(sql.as_str(), parameters.as_slice())
-                .map_err(|error| {
-                    crate::error::database_error_with_context_lazy(error, || {
-                        format!(
-                            "failed to execute ODBC query: `{}`",
-                            sql_preview(sql.as_str())
-                        )
-                    })
-                })?
-            {
-                stream_result_sets(cursor, buffer_settings, tx)?;
-                return Ok(());
-            }
-
-            let rows_affected = statement.row_count().map_err(|error| {
-                crate::error::database_error_with_context_lazy(error, || {
-                    format!(
-                        "failed to read ODBC row count for query: `{}`",
-                        sql_preview(sql.as_str())
-                    )
-                })
-            })?;
-            send_rows_affected(rows_affected, tx)
-        }
+) -> sqlx_core::Result<()> {
+    let supplied = parameters.len();
+    let expected = usize::from(prepared.num_params().map_err(|error| {
+        crate::error::database_error_with_context_lazy(error, || {
+            format!(
+                "failed to read ODBC parameter count for query: `{}`",
+                sql_preview(sql)
+            )
+        })
+    })?);
+    if supplied != expected {
+        return Err(sqlx_core::Error::Protocol(format!(
+            "ODBC query expects {expected} bind parameters, but received {supplied}"
+        )));
     }
+
+    if let Some(cursor) = prepared.execute(parameters.as_slice()).map_err(|error| {
+        crate::error::database_error_with_context_lazy(error, || {
+            format!(
+                "failed to execute prepared ODBC statement: `{}`",
+                sql_preview(sql)
+            )
+        })
+    })? {
+        return stream_result_sets(cursor, buffer_settings, tx);
+    }
+
+    let rows_affected = prepared.row_count().map_err(|error| {
+        crate::error::database_error_with_context_lazy(error, || {
+            format!(
+                "failed to read ODBC row count for prepared statement: `{}`",
+                sql_preview(sql)
+            )
+        })
+    })?;
+    send_rows_affected(rows_affected, tx)
+}
+
+fn execute_direct(
+    conn: &odbc_api::Connection<'static>,
+    sql: &str,
+    buffer_settings: OdbcBufferSettings,
+    tx: &ExecuteSender,
+) -> sqlx_core::Result<()> {
+    let mut statement = conn.preallocate().map_err(|error| {
+        crate::error::database_error_with_context_lazy(error, || {
+            format!(
+                "failed to allocate an ODBC statement for query: `{}`",
+                sql_preview(sql)
+            )
+        })
+    })?;
+
+    if let Some(cursor) = statement.execute(sql, ()).map_err(|error| {
+        crate::error::database_error_with_context_lazy(error, || {
+            format!("failed to execute ODBC query: `{}`", sql_preview(sql))
+        })
+    })? {
+        return stream_result_sets(cursor, buffer_settings, tx);
+    }
+
+    let rows_affected = statement.row_count().map_err(|error| {
+        crate::error::database_error_with_context_lazy(error, || {
+            format!(
+                "failed to read ODBC row count for query: `{}`",
+                sql_preview(sql)
+            )
+        })
+    })?;
+    send_rows_affected(rows_affected, tx)
 }
 
 fn send_rows_affected(
@@ -558,12 +688,14 @@ fn send_rows_affected(
 }
 
 fn send_done(tx: &ExecuteSender, rows_affected: u64) -> bool {
-    tx.send(Ok(Either::Left(OdbcQueryResult::new(rows_affected))))
-        .is_ok()
+    tx.send(QueryMessage::Item(Either::Left(OdbcQueryResult::new(
+        rows_affected,
+    ))))
+    .is_ok()
 }
 
 fn send_row(tx: &ExecuteSender, row: OdbcRow) -> bool {
-    tx.send(Ok(Either::Right(row))).is_ok()
+    tx.send(QueryMessage::Item(Either::Right(row))).is_ok()
 }
 
 fn ping_query_for_dbms_name(dbms_name: &str) -> &'static str {
@@ -680,7 +812,7 @@ fn stream_result_sets<C>(
 where
     C: Cursor + ResultSetMetadata,
 {
-    loop {
+    while !tx.is_disconnected() {
         if cursor.num_result_cols().map_err(|error| {
             crate::error::database_error_with_context(
                 error,
@@ -688,7 +820,9 @@ where
             )
         })? == 0
         {
-            send_done(tx, 0);
+            if !send_done(tx, 0) {
+                return Ok(());
+            }
         } else if let Some(max_column_size) = settings.max_column_size {
             let (receiver_open, finished_cursor) =
                 stream_rows_buffered(cursor, settings.batch_size, max_column_size, tx)?;
@@ -700,6 +834,10 @@ where
             return Ok(());
         }
 
+        if tx.is_disconnected() {
+            return Ok(());
+        }
+
         match cursor.more_results().map_err(|error| {
             crate::error::database_error_with_context(error, "failed to advance ODBC result set")
         })? {
@@ -707,6 +845,7 @@ where
             None => return Ok(()),
         }
     }
+    Ok(())
 }
 
 #[derive(Debug)]
@@ -799,14 +938,14 @@ where
         }
     }
 
-    send_done(tx, 0);
+    let receiver_open = send_done(tx, 0);
     let (cursor, _) = row_set_cursor.unbind().map_err(|error| {
         crate::error::database_error_with_context(
             error,
             "ODBC buffered fetch could not unbind row buffer",
         )
     })?;
-    Ok((true, cursor))
+    Ok((receiver_open, cursor))
 }
 
 fn build_buffer_bindings(
@@ -1012,8 +1151,7 @@ where
         }
     }
 
-    send_done(tx, 0);
-    Ok(true)
+    Ok(send_done(tx, 0))
 }
 
 fn fetch_value(
@@ -1154,6 +1292,21 @@ fn sql_preview(sql: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn worker_disconnect_after_an_item_surfaces_an_error() {
+        let (tx, rx) = flume::bounded(1);
+        assert!(send_done(&tx, 2));
+        drop(tx);
+
+        let mut stream = receiver_to_stream(rx);
+        assert!(matches!(stream.try_next().await, Ok(Some(Either::Left(_)))));
+        assert!(matches!(
+            stream.try_next().await,
+            Err(sqlx_core::Error::Protocol(_))
+        ));
+        assert!(stream.try_next().await.unwrap().is_none());
+    }
 
     #[test]
     fn buffered_fetch_maps_numeric_types_to_nullable_64_bit_buffers() {

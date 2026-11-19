@@ -96,7 +96,7 @@ impl OdbcConnectOptions {
         self
     }
 
-    /// Opens a blocking ODBC connection.
+    /// Opens an ODBC connection and waits for it on the calling thread.
     pub fn connect_blocking(&self) -> Result<OdbcConnection> {
         OdbcConnection::connect_blocking(self)
     }
@@ -153,7 +153,7 @@ impl sqlx_core::connection::ConnectOptions for OdbcConnectOptions {
     }
 
     async fn connect(&self) -> std::result::Result<Self::Connection, sqlx_core::Error> {
-        self.connect_blocking().map_err(Into::into)
+        OdbcConnection::connect_async(self).await
     }
 
     fn log_statements(mut self, level: LevelFilter) -> Self {

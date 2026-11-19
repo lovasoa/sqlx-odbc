@@ -302,6 +302,61 @@ async fn dropping_large_row_stream_keeps_connection_usable_when_configured(
     Ok(())
 }
 
+#[cfg(feature = "runtime-tokio")]
+#[tokio::test]
+async fn cancelled_query_settles_before_a_following_rollback_when_supported(
+) -> Result<(), Box<dyn std::error::Error>> {
+    use std::time::Duration;
+    use tokio::time::timeout;
+
+    let Some(mut conn) = get_test_conn("ODBC active cancellation test").await? else {
+        return Ok(());
+    };
+    if !conn.dbms_name()?.eq_ignore_ascii_case("PostgreSQL") {
+        conn.close().await?;
+        return Ok(());
+    }
+
+    let mut tx = conn.begin().await?;
+    {
+        let mut rows = sqlx_core::query::query("SELECT 1 FROM pg_sleep(0.5)").fetch(&mut *tx);
+        assert!(timeout(Duration::from_millis(20), rows.try_next())
+            .await
+            .is_err());
+    }
+    timeout(Duration::from_secs(5), tx.rollback()).await??;
+
+    let row = sqlx_core::query::query("SELECT 2")
+        .fetch_one(&mut conn)
+        .await?;
+    assert_eq!(row.try_get::<i32, _>(0)?, 2);
+    conn.close().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn unpolled_query_does_not_prepare_a_statement_when_configured(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let Some(mut conn) = get_test_conn("ODBC lazy stream test").await? else {
+        return Ok(());
+    };
+
+    let query = "SELECT CAST(? AS INTEGER)";
+    let rows = sqlx_core::query::query(query).bind(1_i32).fetch(&mut conn);
+    drop(rows);
+
+    assert_eq!(conn.cached_statements_size(), 0);
+
+    let row = sqlx_core::query::query(query)
+        .bind(2_i32)
+        .fetch_one(&mut conn)
+        .await?;
+    assert_eq!(row.try_get::<i32, _>(0)?, 2);
+    assert_eq!(conn.cached_statements_size(), 1);
+    conn.close().await?;
+    Ok(())
+}
+
 #[tokio::test]
 async fn sqlx_fetch_many_ends_rows_with_query_result_when_configured(
 ) -> Result<(), Box<dyn std::error::Error>> {
