@@ -27,6 +27,7 @@ pub struct OdbcConnection {
     stmt_cache: StatementCache<SharedPreparedStatement>,
     buffer_settings: OdbcBufferSettings,
     transaction_depth: usize,
+    rejected_nested_begin: bool,
 }
 
 impl std::fmt::Debug for OdbcConnection {
@@ -58,6 +59,7 @@ impl OdbcConnection {
             stmt_cache: StatementCache::new(options.statement_cache_capacity),
             buffer_settings: options.buffer_settings,
             transaction_depth: 0,
+            rejected_nested_begin: false,
         })
     }
 
@@ -105,8 +107,12 @@ impl OdbcConnection {
         })
     }
 
-    pub(crate) fn begin_blocking(&mut self) -> std::result::Result<(), sqlx_core::Error> {
-        if self.transaction_depth > 0 {
+    pub(crate) fn begin_blocking(
+        &mut self,
+        statement: Option<sqlx_core::sql_str::SqlStr>,
+    ) -> std::result::Result<(), sqlx_core::Error> {
+        self.rejected_nested_begin = self.transaction_depth > 0;
+        if self.rejected_nested_begin || statement.is_some() {
             return Err(sqlx_core::Error::InvalidSavePointStatement);
         }
 
@@ -169,7 +175,8 @@ impl OdbcConnection {
     }
 
     pub(crate) fn start_rollback(&mut self) {
-        if self.transaction_depth == 0 {
+        // SQLx calls start_rollback when its transaction guard drops after begin fails.
+        if std::mem::take(&mut self.rejected_nested_begin) || self.transaction_depth == 0 {
             return;
         }
 

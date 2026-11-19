@@ -166,6 +166,48 @@ async fn sqlx_connection_connect_ping_and_transaction_when_configured(
 }
 
 #[tokio::test]
+async fn custom_transaction_begin_is_rejected_when_configured(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let Some(mut conn) = get_test_conn("ODBC custom transaction begin test").await? else {
+        return Ok(());
+    };
+    assert!(matches!(
+        conn.begin_with("BEGIN READ ONLY").await,
+        Err(sqlx_core::Error::InvalidSavePointStatement)
+    ));
+    assert!(!conn.is_in_transaction());
+    let mut tx = conn.begin().await?;
+    assert!(matches!(
+        tx.begin().await,
+        Err(sqlx_core::Error::InvalidSavePointStatement)
+    ));
+    assert!(tx.is_in_transaction());
+    assert!(matches!(
+        tx.begin_with("BEGIN READ ONLY").await,
+        Err(sqlx_core::Error::InvalidSavePointStatement)
+    ));
+    assert!(tx.is_in_transaction());
+    tx.rollback().await?;
+
+    let Some(mut any) = get_any_test_conn("Any ODBC custom transaction begin test").await? else {
+        return Ok(());
+    };
+    assert!(matches!(
+        any.begin_with("BEGIN READ ONLY").await,
+        Err(sqlx_core::Error::InvalidSavePointStatement)
+    ));
+    assert!(!any.is_in_transaction());
+    let mut tx = any.begin().await?;
+    assert!(matches!(
+        tx.begin().await,
+        Err(sqlx_core::Error::InvalidSavePointStatement)
+    ));
+    assert!(tx.is_in_transaction());
+    tx.rollback().await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn sqlx_pool_acquires_and_queries_when_configured() -> Result<(), Box<dyn std::error::Error>>
 {
     let Some(url) = database_url("ODBC pool test") else {
