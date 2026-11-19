@@ -662,6 +662,32 @@ async fn sqlx_prepare_reports_basic_metadata_when_configured(
 }
 
 #[tokio::test]
+async fn sqlx_describe_reads_columns_and_propagates_metadata_errors_when_configured(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let Some(mut conn) = get_test_conn("ODBC describe test").await? else {
+        return Ok(());
+    };
+    let sql = sqlx_core::sql_str::SqlStr::from_static("SELECT CAST(7 AS INTEGER) AS answer");
+    let description = (&mut conn).describe(sql.clone()).await?;
+    assert_eq!(description.columns().len(), 1);
+    assert!(description.column(0).name().eq_ignore_ascii_case("answer"));
+    assert!(matches!(description.parameters(), Some(Either::Right(0))));
+
+    let missing = sqlx_core::sql_str::SqlStr::from_static(MISSING_TABLE_READ);
+    assert!((&mut conn).describe(missing).await.is_err());
+    assert_eq!(conn.cached_statements_size(), 0);
+
+    let Some(mut any) = get_any_test_conn("Any ODBC describe test").await? else {
+        return Ok(());
+    };
+    let description = (&mut any).describe(sql).await?;
+    assert_eq!(description.columns().len(), 1);
+    assert!(description.column(0).name().eq_ignore_ascii_case("answer"));
+    assert!(matches!(description.parameters(), Some(Either::Right(0))));
+    Ok(())
+}
+
+#[tokio::test]
 async fn sqlx_prepare_then_statement_query_when_configured(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let Some(mut conn) = get_test_conn("ODBC statement query test").await? else {

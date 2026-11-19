@@ -136,6 +136,17 @@ impl AnyConnectionBackend for OdbcConnection {
             AnyStatement::try_from_statement(statement, column_names)
         })
     }
+
+    fn describe(
+        &mut self,
+        sql: SqlStr,
+    ) -> BoxFuture<'_, sqlx_core::Result<sqlx_core::describe::Describe<sqlx_core::any::Any>>> {
+        Box::pin(async move {
+            sqlx_core::executor::Executor::describe(self, sql)
+                .await?
+                .try_into_any()
+        })
+    }
 }
 
 impl<'a> TryFrom<&'a AnyConnectOptions> for OdbcConnectOptions {
