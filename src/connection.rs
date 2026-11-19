@@ -227,17 +227,7 @@ impl OdbcConnection {
             return Ok(OdbcStatement::new(sql, columns, usize::from(parameters)));
         }
 
-        let mut prepared = Arc::clone(&self.conn)
-            .into_prepared(sql.as_str())
-            .map_err(|error| {
-                sqlx_core::Error::from(crate::error::database_error_with_context(
-                    error,
-                    format!(
-                        "failed to prepare ODBC statement: `{}`",
-                        sql_preview(sql.as_str())
-                    ),
-                ))
-            })?;
+        let mut prepared = self.prepare_handle(sql.as_str())?;
         let parameters = prepared.num_params().map_err(|error| {
             sqlx_core::Error::from(crate::error::database_error_with_context(
                 error,
@@ -254,6 +244,15 @@ impl OdbcConnection {
         }
 
         Ok(OdbcStatement::new(sql, columns, usize::from(parameters)))
+    }
+
+    fn prepare_handle(&self, sql: &str) -> sqlx_core::Result<PreparedStatement> {
+        Arc::clone(&self.conn).into_prepared(sql).map_err(|error| {
+            sqlx_core::Error::from(crate::error::database_error_with_context(
+                error,
+                format!("failed to prepare ODBC statement: `{}`", sql_preview(sql)),
+            ))
+        })
     }
 
     pub(crate) fn execute_receiver(
@@ -432,6 +431,32 @@ impl<'c> Executor<'c> for &'c mut OdbcConnection {
         'c: 'e,
     {
         Box::pin(async move { self.prepare_blocking(sql) })
+    }
+
+    fn describe<'e>(
+        self,
+        sql: sqlx_core::sql_str::SqlStr,
+    ) -> BoxFuture<'e, sqlx_core::Result<sqlx_core::describe::Describe<Self::Database>>>
+    where
+        'c: 'e,
+    {
+        Box::pin(async move {
+            let mut prepared = self.prepare_handle(sql.as_str())?;
+            let parameters = prepared.num_params().map_err(|error| {
+                crate::error::database_error_with_context(
+                    error,
+                    "failed to read ODBC parameter count while describing a query",
+                )
+            })?;
+            // Describe must propagate column metadata errors. Prepare can defer metadata.
+            let columns = collect_columns(&mut prepared)?;
+            let nullable = vec![None; columns.len()];
+            Ok(sqlx_core::describe::Describe {
+                columns,
+                parameters: Some(Either::Right(usize::from(parameters))),
+                nullable,
+            })
+        })
     }
 }
 
