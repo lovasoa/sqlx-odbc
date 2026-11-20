@@ -177,6 +177,22 @@ async fn sqlx_connection_connect_ping_and_transaction_when_configured(
 }
 
 #[tokio::test]
+async fn connection_errors_are_reported_as_database_errors() {
+    let error = OdbcConnection::connect("DSN=DefinitelyNonExistentDataSource_12345")
+        .await
+        .expect_err("connecting to a missing data source should fail");
+
+    let sqlx_core::error::Error::Database(database_error) = error else {
+        panic!("{error:?} should be a database error");
+    };
+
+    assert!(
+        database_error.code().is_some(),
+        "{database_error:?} should carry the driver manager's SQLSTATE"
+    );
+}
+
+#[tokio::test]
 async fn sqlx_pool_acquires_and_queries_when_configured() -> Result<(), Box<dyn std::error::Error>>
 {
     let Some(url) = database_url("ODBC pool test") else {
